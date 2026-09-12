@@ -416,6 +416,9 @@ the running program.
 For example, `bin/mhseval +RTS -H1M -v -RTS hello` runs `out.comb` and the program gets the argument `hello`,
 whereas the runtime system sets the heap to 1M cells and is verbose.
 
+The runtime can also be compiled to JavaScript with emscripten, `make rts.js`.
+The resulting `rts.js` runs a combinator file with node, e.g., `node rts.js out.comb hello`.
+
 ### FFI
 MicroHs supports calling C functions.
 When running the program directly (using `-r`) or when generating a `.comb` file only the functions in the table built
