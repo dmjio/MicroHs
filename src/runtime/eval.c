@@ -26,6 +26,131 @@
 #endif  /* WANT_MATH */
 #if defined(__EMSCRIPTEN__)
 #include "emscripten.h"
+extern int mhs_js_keep_alive;
+extern int mhs_js_exn_handle;
+EM_JS(char *, mhs_js_exn_cstring, (int k), {
+  var v = Module.mhsjs.getJSVal(k);
+  return stringToNewUTF8("JavaScript exception: " + String(v && v.stack ? v.stack : v));
+});
+
+/*
+ * Set up the JavaScript side of JSVal handling, see the JSVal section further down.
+ */
+EM_JS(void, mhs_js_init, (void), {
+  if (Module.mhsjs) return;
+  var M = {
+    lastk: 0,
+    kv: new Map(),
+    fns: new Map(),
+    newJSVal: function(v) { var k = ++M.lastk; M.kv.set(k, v); return k; },
+    getJSVal: function(k) {
+      if (k === 0) return undefined;
+      if (!M.kv.has(k)) throw new Error("mhs: JSVal " + k + " used after being freed");
+      return M.kv.get(k);
+    },
+    /* Explicit free from Haskell: also release a callback's stable pointer. */
+    freeJSVal: function(k) {
+      if (k === 0) return;
+      var v = M.kv.get(k);
+      if (typeof v === "function" && v.mhs_sp) {
+        _mhs_js_free_sp(v.mhs_sp);
+        v.mhs_sp = 0;
+        if (M.registry) M.registry.unregister(v);
+      }
+      M.kv.delete(k);
+    },
+    /* Called by the garbage collector when the Haskell side no longer references the handle. */
+    dropJSVal: function(k) { M.kv.delete(k); },
+    error: undefined,
+    hasError: false,
+    compile: function(src, n, isAsync) {
+      var params = [];
+      for (var i = 1; i <= n; i++) params.push("$" + i);
+      var binder = (isAsync ? "async (" : "(") + params.join(",") + ")";
+      var forms = [binder + " => (" + src + "\n)", binder + " => {" + src + "\n}"];
+      for (var j = 0; j < forms.length; j++) {
+        try {
+          return new Function("Module", "mhsjs", "return " + forms[j] + ";")(Module, M);
+        } catch (e) {
+          if (!(e instanceof SyntaxError)) throw e;
+        }
+      }
+      throw new Error("mhs: cannot compile JavaScript FFI code: " + src);
+    },
+    /* Call the (cached) function for the snippet at address srcp with the given arguments. */
+    call: function(srcp, n, args) {
+      var f = M.fns.get(srcp);
+      if (f === undefined) {
+        f = M.compile(UTF8ToString(srcp), n, false);
+        M.fns.set(srcp, f);
+      }
+      return f.apply(null, args);
+    },
+    /* As call, but a JavaScript exception is saved and later raised as a Haskell exception. */
+    callSafe: function(srcp, n, args) {
+      try {
+        return M.call(srcp, n, args);
+      } catch (e) {
+        M.error = e;
+        M.hasError = true;
+        return 0;
+      }
+    },
+    /* As callSafe, but the code is an async function; returns a Promise. */
+    callAsync: async function(srcp, n, args) {
+      var f = M.fns.get(srcp);
+      if (f === undefined) {
+        f = M.compile(UTF8ToString(srcp), n, true);
+        M.fns.set(srcp, f);
+      }
+      try {
+        return await f.apply(null, args);
+      } catch (e) {
+        M.error = e;
+        M.hasError = true;
+        return 0;
+      }
+    },
+    /* Make a JavaScript function that calls the Haskell function referenced by the
+     * stable pointer sp with n JSVal arguments.  If ret is set the Haskell function
+     * returns a JSVal.  A synchronous callback runs immediately, an asynchronous
+     * callback runs later and returns a Promise. */
+    mkCallback: function(sp, n, sync, ret) {
+      var run = function(args) {
+        var p = _mhs_js_alloc(4 * (n + 1));
+        for (var i = 0; i < n; i++) HEAP32[(p >> 2) + i] = M.newJSVal(args[i]);
+        var r;
+        try {
+          r = _mhs_js_callback(sp, ret, n, p);
+        } finally {
+          _mhs_js_free_mem(p);
+        }
+        return ret ? M.getJSVal(r) : undefined;
+      };
+      var f;
+      if (sync) {
+        f = function() { return run(arguments); };
+      } else {
+        f = function() {
+          var args = arguments;
+          return new Promise(function(resolve, reject) {
+            setTimeout(function() {
+              try { resolve(run(args)); } catch (e) { reject(e); }
+            }, 0);
+          });
+        };
+      }
+      f.mhs_sp = sp;
+      if (M.registry) M.registry.register(f, sp, f);
+      _mhs_js_keepalive();
+      return M.newJSVal(f);
+    }
+  };
+  M.registry = (typeof FinalizationRegistry !== "undefined") ?
+    new FinalizationRegistry(function(sp) { _mhs_js_free_sp(sp); }) : null;
+  Module.mhsjs = M;
+});
+
 #endif /* __EMSCRIPTEN__ */
 #if WANT_DIR
 #include <dirent.h>
@@ -663,6 +788,7 @@ enum fptype {
   FP_FORPTR = 0,                /* a regular foreign pointer to unknown memory */
   FP_BSTR,                      /* a bytestring */
   FP_MPZ,                       /* a GMP MPZ pointer */
+  FP_JSVAL,                     /* a JavaScript value (an index into a table on the JavaScript side) */
 };
 
 /*
@@ -989,7 +1115,7 @@ free_stableptr(uvalue_t sp)
 
 /* The order of these must be kept in sync with Control.Exception.Internal.rtsExn */
 enum rts_exn { exn_stackoverflow, exn_heapoverflow, exn_threadkilled, exn_userinterrupt,
-               exn_dividebyzero, exn_blockedmvar, exn_blockedstm, exn_overflow };
+               exn_dividebyzero, exn_blockedmvar, exn_blockedstm, exn_overflow, exn_jsexception };
 
 NORETURN void raise_exn(NODEPTR exn);
 struct mvar* new_mvar(void);
@@ -3999,6 +4125,8 @@ case T_DBL: putb('&', f); putdblb(GETDBLVALUE(n), f); break;
 #endif  /* WANT_GMP */
     else if (FORPTR(n)->finalizer->fptype == FP_BSTR) {
       print_string(f, FORPTR(n)->payload);
+    } else if (FORPTR(n)->finalizer->fptype == FP_JSVAL) {
+      ERR("cannot serialize JSVal");
     } else if (prefix) {
       snprintf(prbuf, sizeof prbuf, "FORPTR<%p>",FORPTR(n));
       putsb(prbuf, f);
@@ -6327,6 +6455,9 @@ die_exn(NODEPTR exn)
     case 5: msg = "blocked MVar"; break;
     case 6: msg = "blocked STM"; break;
     case 7: msg = "arithmetic overflow"; break;
+#if defined(__EMSCRIPTEN__)
+    case 8: msg = mhs_js_exn_cstring(mhs_js_exn_handle); break;
+#endif
     default: msg = "unknown"; break;
     }
   } else {
@@ -6481,6 +6612,9 @@ MHS_INIT_ARGS(
   stack = mmalloc(sizeof(NODEPTR) * stack_size);
   CLEARSTK();
   init_stableptr();
+#if defined(__EMSCRIPTEN__)
+  mhs_js_init();
+#endif
 
   num_reductions = 0;
 
@@ -6681,6 +6815,13 @@ mhs_main(int argc, char **argv)
 #ifdef TEARDOWN
   main_teardown(); /* do some platform specific teardown */
 #endif
+#if defined(__EMSCRIPTEN__)
+  if (mhs_js_keep_alive) {
+    /* JavaScript callbacks into Haskell have been created, so keep the runtime alive
+     * so they can be called after main has finished. */
+    emscripten_exit_with_live_runtime();
+  }
+#endif
   EXIT(0);
 }
 
@@ -6851,6 +6992,150 @@ MHS_TO(mhs_to_CTime, evalint, time_t);
 MHS_TO(mhs_to_CIntPtr, evalint, intptr_t);
 MHS_TO(mhs_to_CUIntPtr, evalint, uintptr_t);
 
+from_t
+mhs_from_Bool(stackptr_t stk, int n, int b)
+{
+  NODEPTR r = TOP(0);
+  SETIND(r, b ? combTrue : combFalse);
+  return n;
+}
+
+int
+mhs_to_Bool(stackptr_t stk, int n)
+{
+  NODEPTR b = evali(ARG(TOP(n+1)));
+  return GETTAG(b) == T_A;
+}
+
+/* Pass an arbitrary (unevaluated) Haskell value to C as a stable pointer.
+ * Used for callbacks, the C side is responsible for freeing it. */
+uvalue_t
+mhs_to_HsStablePtr(stackptr_t stk, int n)
+{
+  return new_stableptr(ARG(TOP(n+1)));
+}
+
+#if defined(__EMSCRIPTEN__)
+/*
+ * JavaScript values (JSVal).
+ *
+ * A JSVal is represented by an integer handle into a table on the JavaScript
+ * side (Module.mhsjs), since only numbers can be passed between C and JavaScript.
+ * On the Haskell side the handle lives in a T_FORPTR node with a finalizer
+ * that drops the table entry when the node is garbage collected.
+ * Handle 0 means 'undefined'.
+ *
+ * The JavaScript side also
+ *  - compiles the code of 'foreign import javascript' snippets (once per import)
+ *    into functions with parameters $1, $2, ..., which can also use 'Module' and 'mhsjs',
+ *  - creates JavaScript functions that call back into Haskell via a stable pointer.
+ */
+int mhs_js_keep_alive = 0;
+
+EM_JS(void, mhs_js_drop, (int k), { Module.mhsjs.dropJSVal(k); });
+
+static void
+mhs_jsval_finalizer(void *arg)
+{
+  mhs_js_drop((int)(intptr_t)arg);
+}
+
+from_t
+mhs_from_JSVal(stackptr_t stk, int n, int k)
+{
+  NODEPTR r = TOP(0);
+  struct forptr *fp = mkForPtrP((void *)(intptr_t)k);
+  fp->finalizer->final = (HsFunPtr)mhs_jsval_finalizer;
+  fp->finalizer->fptype = FP_JSVAL;
+  SETFORPTR(r, fp);
+  return n;
+}
+
+int
+mhs_to_JSVal(stackptr_t stk, int n)
+{
+  struct forptr *fp = evalforptr(ARG(TOP(n+1)));
+  return (int)(intptr_t)fp->payload.string;
+}
+
+/* JavaScript exceptions from 'safe' and 'interruptible' imports are raised as
+ * Haskell exceptions (exn_jsexception), with the JavaScript value in mhs_js_exn_handle. */
+int mhs_js_exn_handle = 0;
+
+EM_JS(int, mhs_js_take_error, (void), {
+  var M = Module.mhsjs;
+  if (!M.hasError) return 0;
+  M.hasError = false;
+  var k = M.newJSVal(M.error);
+  M.error = undefined;
+  return k;
+});
+
+void
+mhs_js_check_error(void)
+{
+  int k = mhs_js_take_error();
+  if (k) {
+    mhs_js_exn_handle = k;
+    raise_rts(exn_jsexception);
+  }
+}
+
+/* js_take_exn :: Int -> IO JSVal, get the exception value after an exn_jsexception.
+ * The argument is ignored. */
+from_t
+mhs_js_take_exn(int s)
+{
+  int k = mhs_js_exn_handle;
+  mhs_js_exn_handle = 0;
+  return mhs_from_JSVal(s, 1, k);
+}
+
+/* js_exn_string :: JSVal -> IO String, the description of a JavaScript exception. */
+from_t
+mhs_js_exn_string(int s)
+{
+  char *str = mhs_js_exn_cstring(mhs_to_JSVal(s, 0));
+  struct bytestring bs = { strlen(str), str };
+  gc_check(3 * bs.size + 4);    /* so mkStringU does not trigger a GC */
+  NODEPTR r = mkStringU(bs);
+  FREE(str);
+  SETIND(TOP(0), r);
+  return 1;
+}
+
+/* Entry points used from JavaScript. */
+EMSCRIPTEN_KEEPALIVE void *mhs_js_alloc(int n) { return mmalloc(n); }
+EMSCRIPTEN_KEEPALIVE void mhs_js_free_mem(void *p) { FREE(p); }
+EMSCRIPTEN_KEEPALIVE void mhs_js_free_sp(uvalue_t sp) { free_stableptr(sp); }
+EMSCRIPTEN_KEEPALIVE void mhs_js_keepalive(void) { mhs_js_keep_alive = 1; }
+
+/* Call the Haskell function referenced by the stable pointer sp with nargs JSVal
+ * arguments (handles in args).  If ret is set, return the handle of the resulting JSVal.
+ * The Haskell function must have type JSVal -> ... -> JSVal -> IO () (or IO JSVal). */
+EMSCRIPTEN_KEEPALIVE int
+mhs_js_callback(uvalue_t sp, int ret, int nargs, int *args)
+{
+  int r = 0;
+  gc_check(2 * nargs + 8);
+  ffe_push(deref_stableptr(sp));
+  for (int i = 0; i < nargs; i++) {
+    mhs_from_JSVal(ffe_alloc(), 0, args[i]);
+    ffe_apply();
+  }
+  if (ret) {
+    r = mhs_to_JSVal(ffe_exec(), -1);
+  } else {
+    (void)ffe_exec();
+  }
+  ffe_pop();
+  /* Flush standard handles in case there is some BFILE buffering */
+  flushb((BFILE*)FORPTR(comb_stdout)->payload.string);
+  flushb((BFILE*)FORPTR(comb_stderr)->payload.string);
+  return r;
+}
+#endif  /* __EMSCRIPTEN__ */
+
 /* The rest of this file was generated by the compiler, with some minor edits with #if. */
 from_t mhs_GETRAW(int s) { return  mhs_from_Int(s, 0, GETRAW()); }
 from_t mhs_GETTIMEMILLI(int s) { return  mhs_from_Int(s, 0, GETTIMEMILLI()); }
@@ -6888,6 +7173,9 @@ from_t mhs_js_debug(int s) { EM_ASM({ console.log(UTF8ToString($0)) }, mhs_to_Pt
 from_t mhs_js_eval_run(int s) { EM_ASM({ eval(UTF8ToString($0)) }, mhs_to_Ptr(s, 0)); return mhs_from_Unit(s, 1); }
 from_t mhs_js_eval_call(int s) { return mhs_from_Ptr(s, 1, EM_ASM_PTR({ return stringToNewUTF8(JSON.stringify(eval(UTF8ToString($0)))) }, mhs_to_Ptr(s, 0))); }
 from_t mhs_js_set_haskellCallback(int s) { EM_ASM({ _haskellCallback = $0 }, mhs_to_Int(s, 0)); return mhs_from_Unit(s, 1); }
+from_t mhs_js_free_jsval(int s) { EM_ASM({ Module.mhsjs.freeJSVal($0) }, mhs_to_JSVal(s, 0)); return mhs_from_Unit(s, 1); }
+from_t mhs_js_take_exn(int s);
+from_t mhs_js_exn_string(int s);
 #endif
 
 #if WANT_STDIO
@@ -7236,6 +7524,9 @@ const struct ffi_entry ffi_table[] = {
   { "js_eval_run", 1, mhs_js_eval_run},
   { "js_eval_call", 1, mhs_js_eval_call},
   { "js_set_haskellCallback", 1, mhs_js_set_haskellCallback},
+  { "js_free_jsval", 1, mhs_js_free_jsval},
+  { "js_take_exn", 1, mhs_js_take_exn},
+  { "js_exn_string", 1, mhs_js_exn_string},
 #endif
 
 #if WANT_STDIO

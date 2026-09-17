@@ -16,6 +16,7 @@ module Control.Exception.Internal(
   BlockedIndefinitelyOnMVar(..),
   BlockedIndefinitelyOnSTM(..),
   ErrorCall(ErrorCallWithLocation, ErrorCall),
+  JSException(..),
 
   uninterruptibleMask,
   uninterruptibleMask_,
@@ -74,7 +75,23 @@ rtsExn e =
       else if primIntEQ n (5::Int) then SomeException BlockedIndefinitelyOnMVar
       else if primIntEQ n (6::Int) then SomeException BlockedIndefinitelyOnSTM
       else if primIntEQ n (7::Int) then SomeException Overflow
+      else if primIntEQ n (8::Int) then let v = primPerformIO (primJSTakeExn n) in primSeq v (SomeException (JSException v))
       else e
+
+-- A JavaScript exception, only with the emscripten target.
+-- See GHC.Wasm.Prim.
+newtype JSException = JSException JSVal
+  deriving (Typeable)
+
+instance Show JSException where
+  showsPrec _ (JSException v) r = showString "JSException: " (showString (primPerformIO (primJSExnString v)) r)
+
+instance Exception JSException
+
+-- These are in the runtime system.
+-- The Int argument is ignored, it is there so that the call is not floated out as a constant.
+foreign import ccall "js_take_exn" primJSTakeExn :: Int -> IO JSVal
+foreign import ccall "js_exn_string" primJSExnString :: JSVal -> IO String
 
 -- Throw an exception when executed, not when evaluated
 throwIO :: forall a e . Exception e => e -> IO a

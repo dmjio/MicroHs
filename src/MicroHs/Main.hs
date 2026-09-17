@@ -347,7 +347,9 @@ mainCompile flags mn = do
       locs <- sum . map (length . lines) <$> mapM readFile fns
       putStrLn $ show (locs * 1000 `div` (t2 - t0)) ++ " lines/s"
 
-    let (cFFI, hFFI) = makeFFI flags forExps outDefs
+    let (cFFI, hFFI, asyncFFI) = makeFFI flags forExps outDefs
+        -- Interruptible JavaScript imports need emscripten's ASYNCIFY
+        flagsC = if asyncFFI then flags{cArgs = cArgs flags ++ ["-sASYNCIFY", "-sASYNCIFY_STACK_SIZE=4194304"]} else flags
         cCode = "#include \"mhsffi.h\"\n" ++ makeCArray flags outData ++ cFFI
 
     let outFile = output flags
@@ -374,7 +376,7 @@ mainCompile flags mn = do
        let ppkgs = getPathPkgs cash
        hPutStr h cCode
        hClose h
-       mainCompileC flags ppkgs fn
+       mainCompileC flagsC ppkgs fn
        removeFile fn
 
 mainCompileC :: Flags -> [(FilePath, Package)] -> FilePath -> IO ()

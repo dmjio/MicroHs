@@ -46,7 +46,7 @@ dsDef flags mn ffiNo adef =
       in  zipWith dsConstr [0::Int ..] cs
     Newtype _ (Constr _ _ c _ _) _ -> [ (qualIdent mn c, Lit (LPrim "I")) ]
     Fcn f eqns -> [(f, wrapTick (useTicks flags) f $ dsEqns (getSLoc f) eqns)]
-    ForImp cc ie i t -> [(i, ccall t $ Lit $ mkForImp ffiNo cc ie i t)]
+    ForImp cc sf ie i t -> [(i, ccall t $ Lit $ mkForImp mn ffiNo cc sf ie i t)]
     -- Foreign exports don't fit very well into the desugared syntax.
     -- We represent
     --   foreign export "foo" bar :: ty
@@ -72,7 +72,7 @@ dsDef flags mn ffiNo adef =
 -- If the function is impure then wrap a performIO around the call.
 ccall :: EType -> Exp -> Exp
 ccall t f =
-  case getArrows t of
+  case getArrows (dropForallContext t) of
     (_, EApp (EVar io) _) | io == identIO ->
       f
     (as, _) ->
@@ -609,9 +609,9 @@ lazier def = def
 -- "wrapper"
 -- When the calling convention is ccall the 'expr' has to be a name,
 -- with capi it can be any C expression.
-parseImpEnt :: SLoc -> CallConv -> String -> String -> ImpEnt
-parseImpEnt _ Cjavascript _ s = ImpJS s
-parseImpEnt loc _cc ui s =
+parseImpEnt :: SLoc -> CallConv -> Safety -> String -> String -> ImpEnt
+parseImpEnt _ Cjavascript sf _ s = ImpJS sf s
+parseImpEnt loc _cc _ ui s =
   case words s of
     ["dynamic"] -> ImpDynamic
     ["wrapper"] -> ImpWrapper
@@ -630,16 +630,17 @@ parseImpEnt loc _cc ui s =
 badForImp :: SLoc -> a
 badForImp loc = errorMessage loc "bad foreign import"
 
-mkForImp :: Int -> CallConv -> Maybe String -> Ident -> EType -> Lit
-mkForImp _ Cjavascript Nothing i _ = badForImp (getSLoc i)
-mkForImp no cc ms i ty =
+mkForImp :: IdentModule -> Int -> CallConv -> Safety -> Maybe String -> Ident -> EType -> Lit
+mkForImp _ _ Cjavascript _ Nothing i _ = badForImp (getSLoc i)
+mkForImp mn no cc sf ms i ty =
   let cty = CType ty
       loc = getSLoc i
       ui  = unIdent (unQualIdent i)
       isValidC (c:cs) = isAlpha c && all (\ d -> isAlphaNum d || d == '_') cs
       isValidC _ = False
-      impent = parseImpEnt loc cc ui $ fromMaybe "" ms
-      fno = show no
+      impent = parseImpEnt loc cc sf ui $ fromMaybe "" ms
+      -- The number is only unique within a module, so qualify it with the module name.
+      fno = map (\ c -> if isAlphaNum c then c else '_') (unIdent mn) ++ "_" ++ show no
       cid =
         case impent of
           ImpStatic _ _ n ->

@@ -127,6 +127,9 @@ testforimp:
 testforimpjs:
 	MHSDIR=.. $(TMHS) -temscripten ForImpJS -of.js && node f.js > ForImpJS.out && diff ForImpJS.ref ForImpJS.out
 
+testjsval:
+	MHSDIR=.. $(TMHS) -temscripten JSVal -of.js && node f.js > JSVal.out && diff JSVal.ref JSVal.out
+
 testforexp:
 	MHSDIR=.. $(TMHS) -c -optc --shared -optc -fPIC ForExp -oForExpHs.so && $(CC) -lm ForExp.c ForExpHs.so -Wl,-rpath,'$$ORIGIN' -o ForExp.exe && ./ForExp.exe > ForExp.out && diff ForExp.ref ForExp.out
 

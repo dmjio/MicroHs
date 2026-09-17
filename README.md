@@ -426,6 +426,32 @@ into `src/runtime/eval.c` can be used.  When generating a `.c` file or an execut
 
 There is a lot of missing FFI functionality compared to GHC.
 
+#### JavaScript FFI
+With the emscripten target (`-temscripten`) it is possible to call JavaScript, using `foreign import javascript`.
+The string is JavaScript code that can refer to the arguments as `$1`, `$2`, etc.
+The code can be an expression, or statements that use `return`, e.g.,
+```Haskell
+foreign import javascript "$1 + $2"                          add     :: Int -> Int -> Int
+foreign import javascript "return document.getElementById($1)" getElem :: JSString -> IO JSVal
+```
+The code can also use the emscripten `Module` object, e.g., `Module.UTF8ToString($1)`.
+The allowed types are `Int`, `Word`, `Char`, `Bool`, `Double`, `Float`, `Ptr`, `JSVal` (and newtypes of these, e.g., `JSString`),
+and `()` as a result.
+A `JSVal` is a reference to a JavaScript value; the value is kept in a table on the JavaScript side
+until the `JSVal` is garbage collected (or `freeJSVal` is called).
+The module `GHC.Wasm.Prim` (mimicking GHC's WebAssembly backend) has `JSVal`, `JSString`, `freeJSVal`,
+string conversions, and functions to create JavaScript callbacks that call Haskell,
+e.g., `syncCallback1 :: (JSVal -> IO ()) -> IO JSVal`.
+Callbacks can also be made with `foreign import javascript "wrapper sync"` (or `"wrapper"` for a callback that
+runs the Haskell code later and returns a `Promise`), like in GHC's WebAssembly backend.
+The safety annotation matters: with `unsafe` (the default) a JavaScript exception in the code is fatal,
+with `safe` it is raised as a `JSException`, and with `interruptible` the code is an `async` function
+(so it can use `await`) and the Haskell program waits for the result; this uses emscripten's ASYNCIFY,
+which is added to the C compiler flags automatically.
+When a program has created callbacks the JavaScript runtime stays alive after `main` returns, so the callbacks
+can be invoked by JavaScript events.
+See `tests/JSVal.hs` for examples.
+
 ### Records
 MicroHs implements the record dot extensions.
 So accessing a field `a` in record `r` is written `r.a`, as well as the usual `a r`.
