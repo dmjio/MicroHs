@@ -52,6 +52,13 @@ showToken (TPragma _ s) = "{-# " ++ s ++ " #-}"
 showToken (TEnd _) = "EOF"
 showToken (TRaw _) = "TRaw"
 
+-- Lex an operator (a sequence of operator characters)
+lexOper :: SLoc -> String -> [Token]
+lexOper loc (d:cs) =
+  case span isOperChar cs of
+    (ds, rs) -> TIdent loc [] (d:ds) : lex (addCol loc $ 1 + length ds) rs
+lexOper loc [] = lex loc []
+
 incrLine :: SLoc -> SLoc
 incrLine (SLoc f l _) = let l' = l+1 in seq l' (SLoc f l' 1)
 
@@ -97,8 +104,12 @@ lex loc cs@(d:_) | isDigit d =
     (Right q, len, rs) -> TRat loc q : lexSkipHash (addCol loc len) rs
 lex loc ('.':cs@(d:_)) | isLower_ d =
   TSpec loc '.' : lex (addCol loc 1) cs
-lex loc ('(':dcs@(d:cs)) | d == '#'  = TSpec loc 'L' : lex (addCol loc 2) cs
+-- '(#' starts an unboxed tuple, unless it is the start of an operator like (#) or (#>)
+lex loc ('(':dcs@(d:cs)) | d == '#' && not (isOperClose cs) = TSpec loc 'L' : lex (addCol loc 2) cs
+                         | d == '#' = TSpec loc '(' : lexOper (addCol loc 1) dcs
                          | otherwise = TSpec loc '(' : lex (addCol loc 1) dcs
+  where isOperClose (e:_) = e == ')' || isOperChar e
+        isOperClose [] = False
 lex loc ('#':')':cs) = TSpec loc 'R' : lex (addCol loc 2) cs
 -- Recognize #line 123 "file/name.hs"
 lex loc ('#':xcs) | (SLoc _ _ 1) <- loc, Just cs <- stripPrefix "line " xcs =
@@ -117,9 +128,7 @@ lex loc (c:cs@(d:_)) | isSpecSing c && not (isOperChar d) = -- handle reserved
   TSpec loc c :
     let ts = lex (addCol loc 1) cs
     in  if c == '\\' then tLam ts else ts
-lex loc (d:cs) | isOperChar d =
-  case span isOperChar cs of
-    (ds, rs) -> TIdent loc [] (d:ds) : lex (addCol loc $ 1 + length ds) rs
+lex loc dcs@(d:_) | isOperChar d = lexOper loc dcs
 lex loc (d:cs) | isSpec d =
   TSpec loc d : lex (addCol loc 1) cs
 lex loc ('"':'"':'"':cs) = lexLitStr loc (addCol loc 3) (TString loc) isTrip multiLine cs

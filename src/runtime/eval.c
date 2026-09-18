@@ -30,7 +30,11 @@ extern int mhs_js_keep_alive;
 extern int mhs_js_exn_handle;
 EM_JS(char *, mhs_js_exn_cstring, (int k), {
   var v = Module.mhsjs.getJSVal(k);
-  return stringToNewUTF8("JavaScript exception: " + String(v && v.stack ? v.stack : v));
+  var s = String(v);
+  /* Some engines (node) include the message in the stack, others (QuickJS) do not. */
+  if (v && v.stack && String(v.stack).indexOf(s) !== 0) s += "\n" + v.stack;
+  else if (v && v.stack) s = String(v.stack);
+  return stringToNewUTF8("JavaScript exception: " + s);
 });
 
 /*
@@ -134,9 +138,12 @@ EM_JS(void, mhs_js_init, (void), {
         f = function() {
           var args = arguments;
           return new Promise(function(resolve, reject) {
-            setTimeout(function() {
+            var go = function() {
               try { resolve(run(args)); } catch (e) { reject(e); }
-            }, 0);
+            };
+            /* setTimeout is not available in all engines (e.g. QuickJS) */
+            if (typeof setTimeout === "function") setTimeout(go, 0);
+            else Promise.resolve().then(go);
           });
         };
       }

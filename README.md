@@ -451,6 +451,8 @@ which is added to the C compiler flags automatically.
 When a program has created callbacks the JavaScript runtime stays alive after `main` returns, so the callbacks
 can be invoked by JavaScript events.
 See `tests/JSVal.hs` for examples.
+The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)
+generate JavaScript only (`-sWASM=0`) instead of WebAssembly; the JavaScript FFI works the same way.
 
 ### Records
 MicroHs implements the record dot extensions.

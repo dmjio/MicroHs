@@ -23,7 +23,7 @@ foreign import javascript "$1"                          strToJSVal :: JSString -
 foreign import javascript "[1,2,3].map($1)"             mapJS      :: JSVal -> IO JSVal
 foreign import javascript "$1()"                        call0      :: JSVal -> IO JSVal
 foreign import javascript "$1($2, $3)"                  call2      :: JSVal -> JSVal -> JSVal -> IO JSVal
-foreign import javascript "setTimeout($1, 0)"           setTimeout0 :: JSVal -> IO ()
+foreign import javascript "Promise.resolve().then($1)"  later      :: JSVal -> IO ()
 foreign import javascript "$1.then($2)"                 thenP      :: JSVal -> JSVal -> IO ()
 foreign import javascript "mhsjs.kv.size"               tableSize  :: IO Int
 foreign import javascript "globalThis"                  global     :: JSVal
@@ -31,7 +31,7 @@ foreign import javascript "typeof globalThis.mhsjs_free_test"
                                                         freeTest   :: IO JSString
 foreign import javascript safe "$1.no.such"             badProp    :: JSVal -> IO JSVal
 foreign import javascript interruptible "await $1"      await      :: JSVal -> IO JSVal
-foreign import javascript "new Promise(function (r) { setTimeout(function () { r($1) }, 10) })"
+foreign import javascript "new Promise(function (r) { Promise.resolve().then(function () { r($1) }) })"
                                                         delayed    :: Int -> IO JSVal
 foreign import javascript "Promise.reject(new Error('nope'))"
                                                         rejected   :: IO JSVal
@@ -111,7 +111,7 @@ main = do
   -- asynchronous callbacks run after main has finished
   done <- syncCallback1 $ \ _ -> putStrLn "promise resolved"
   acb <- asyncCallback $ putStrLn "async callback called"
-  setTimeout0 acb
+  later acb
   p <- call0 acb
   thenP p done
   putStrLn "main done"

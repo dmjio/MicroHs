@@ -617,8 +617,8 @@ parseImpEnt loc _cc _ ui s =
     ["wrapper"] -> ImpWrapper
     "static" : r -> rest r
     r            -> rest r
- where rest (inc : r) | ".h" `isSuffixOf` inc = rest' (ImpStatic [inc]) r
-       rest r                                 = rest' (ImpStatic [])    r
+ where rest r = let (incs, r') = span (".h" `isSuffixOf`) r   -- there can be several header files
+                in  rest' (ImpStatic incs) r'
        rest' c ("&"     : r) = rest'' (c IPtr) r
        rest' c ['&'     : r] = rest'' (c IPtr) [r]
        rest' c ("value" : r) = rest'' (c IValue) [unwords r]

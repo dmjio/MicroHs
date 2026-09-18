@@ -3,6 +3,7 @@ module GHC.Generics(
   Generic(..), Rep,
   Generic1(..), Rep1,
   V1, U1(..), Par1(..), Rec1(..), K1(..), M1(..),
+  Rec0, R, D1, C1, S1, D, C, S,
   (:+:)(..), (:*:)(..), (:.:)(..),
   ) where
 
@@ -281,6 +282,26 @@ deriving instance Foldable f => Foldable (M1 i c f)
 deriving instance Traversable f => Traversable (M1 i c f)
 
 -- | Meta-information (constructor names, etc.)
+-- | Tag for K1: recursion (of kind @Type@)
+data R
+
+-- | Type synonym for encoding recursion (of kind @Type@)
+type Rec0  = K1 R
+
+-- | Tag for M1: datatype
+data D
+-- | Tag for M1: constructor
+data C
+-- | Tag for M1: record selector
+data S
+
+-- | Type synonym for encoding meta-information for datatypes
+type D1 = M1 D
+-- | Type synonym for encoding meta-information for constructors
+type C1 = M1 C
+-- | Type synonym for encoding meta-information for record selectors
+type S1 = M1 S
+
 type M1 :: forall (k :: Kind) . Type -> Type -> (k -> Type) -> k -> Type
 -- XXX: c :: Meta
 newtype M1 i c f p =

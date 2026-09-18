@@ -32,8 +32,37 @@ module Data.Text(
   isInfixOf,
   replace,
   map,
+  concatMap,
+  foldl,
+  foldl',
+  unwords,
+  toLower,
+  toUpper,
+  strip,
+  stripStart,
+  stripEnd,
+  dropAround,
+  stripPrefix,
+  stripSuffix,
+  any,
+  all,
+  filter,
+  reverse,
+  last,
+  init,
+  elem,
+  zip,
+  span,
+  break,
+  breakOn,
+  takeWhileEnd,
+  count,
+  index,
+  chunksOf,
   ) where
-import qualified Prelude(); import MiniPrelude hiding(head, tail, null, length, words, map)
+import qualified Prelude(); import MiniPrelude hiding(head, tail, null, length, words, map,
+  concatMap, foldl, unwords, any, all, filter, reverse, last, init, elem, zip, span, break)
+import qualified Data.Char as C
 import Control.DeepSeq.Class
 import qualified Data.List as L
 import Data.String
@@ -127,8 +156,8 @@ splitOnList :: Eq a => [a] -> [a] -> [[a]]
 splitOnList [] = error "splitOn: empty"
 splitOnList sep = loop []
   where
-    loop r  [] = [reverse r]
-    loop r  s@(c:cs) | Just t <- L.stripPrefix sep s = reverse r : loop [] t
+    loop r  [] = [L.reverse r]
+    loop r  s@(c:cs) | Just t <- L.stripPrefix sep s = L.reverse r : loop [] t
                      | otherwise = loop (c:r) cs
 
 words :: Text -> [Text]
@@ -178,3 +207,91 @@ takeWhile p = pack . L.takeWhile p . unpack
 
 map :: (Char -> Char) -> Text -> Text
 map f = pack . L.map f . unpack
+
+concatMap :: (Char -> Text) -> Text -> Text
+concatMap f = concat . L.map f . unpack
+
+foldl :: (a -> Char -> a) -> a -> Text -> a
+foldl f z = L.foldl f z . unpack
+
+foldl' :: (a -> Char -> a) -> a -> Text -> a
+foldl' f z = L.foldl' f z . unpack
+
+unwords :: [Text] -> Text
+unwords = intercalate (pack " ")
+
+toLower :: Text -> Text
+toLower = map C.toLower
+
+toUpper :: Text -> Text
+toUpper = map C.toUpper
+
+stripStart :: Text -> Text
+stripStart = dropWhile C.isSpace
+
+stripEnd :: Text -> Text
+stripEnd = dropWhileEnd C.isSpace
+
+strip :: Text -> Text
+strip = stripEnd . stripStart
+
+dropAround :: (Char -> Bool) -> Text -> Text
+dropAround p = dropWhileEnd p . dropWhile p
+
+stripPrefix :: Text -> Text -> Maybe Text
+stripPrefix p t = fmap pack (L.stripPrefix (unpack p) (unpack t))
+
+stripSuffix :: Text -> Text -> Maybe Text
+stripSuffix p t = fmap (pack . L.reverse) (L.stripPrefix (L.reverse (unpack p)) (L.reverse (unpack t)))
+
+any :: (Char -> Bool) -> Text -> Bool
+any p = L.any p . unpack
+
+all :: (Char -> Bool) -> Text -> Bool
+all p = L.all p . unpack
+
+filter :: (Char -> Bool) -> Text -> Text
+filter p = pack . L.filter p . unpack
+
+reverse :: Text -> Text
+reverse = pack . L.reverse . unpack
+
+last :: Text -> Char
+last = L.last . unpack
+
+init :: Text -> Text
+init = pack . L.init . unpack
+
+elem :: Char -> Text -> Bool
+elem c = L.elem c . unpack
+
+zip :: Text -> Text -> [(Char, Char)]
+zip a b = L.zip (unpack a) (unpack b)
+
+span :: (Char -> Bool) -> Text -> (Text, Text)
+span p t = case L.span p (unpack t) of (a, b) -> (pack a, pack b)
+
+break :: (Char -> Bool) -> Text -> (Text, Text)
+break p = span (not . p)
+
+-- | Split at the first occurrence of the pattern (which is part of the second component).
+breakOn :: Text -> Text -> (Text, Text)
+breakOn p t = go [] (unpack t)
+  where ps = unpack p
+        go acc s@(c:cs) | ps `L.isPrefixOf` s = (pack (L.reverse acc), pack s)
+                        | otherwise = go (c:acc) cs
+        go acc [] = (pack (L.reverse acc), empty)
+
+takeWhileEnd :: (Char -> Bool) -> Text -> Text
+takeWhileEnd p = pack . L.reverse . L.takeWhile p . L.reverse . unpack
+
+-- | Number of non-overlapping occurrences of the pattern.
+count :: Text -> Text -> Int
+count p t = L.length (splitOn p t) - 1
+
+index :: Text -> Int -> Char
+index t i = unpack t L.!! i
+
+chunksOf :: Int -> Text -> [Text]
+chunksOf n t | null t = []
+             | otherwise = take n t : chunksOf n (drop n t)

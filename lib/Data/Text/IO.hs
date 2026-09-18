@@ -21,7 +21,7 @@ import Prelude hiding (readFile, writeFile)
 import qualified Prelude as P
 import Control.Exception (evaluate)
 import qualified Data.ByteString as BS
-import Data.Text
+import Data.Text hiding (concatMap, foldl, unwords, any, all, filter, reverse, last, init, elem, zip, span, break, count, index)
 import Data.Text.Encoding
 import System.IO.Base(Handle, IOMode(..), hClose, openFile, stdin, stdout, withFile)
 import qualified System.IO.Base as IO
