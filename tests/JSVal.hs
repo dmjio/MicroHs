@@ -1,4 +1,5 @@
 module JSVal(main) where
+import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.IORef
@@ -114,4 +115,11 @@ main = do
   later acb
   p <- call0 acb
   thenP p done
+  -- threads keep running after main: a thread woken by a callback runs right
+  -- after the callback, and a thread in threadDelay is resumed by a timer
+  mv <- newEmptyMVar
+  _ <- forkIO $ takeMVar mv >>= \ s -> putStrLn ("woken " ++ s)
+  wake <- syncCallback $ putMVar mv "by callback"
+  later wake
+  _ <- forkIO $ threadDelay 20000 >> putStrLn "timer thread ran"
   putStrLn "main done"

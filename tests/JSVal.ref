@@ -22,6 +22,8 @@ caught TypeError
 42
 caught nope
 main done
+woken by callback
 async callback called
 promise resolved
 async callback called
+timer thread ran

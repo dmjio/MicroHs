@@ -1951,6 +1951,49 @@ NODEPTR evali(NODEPTR n);
 /* If this is non-0 it means that the threading system is active. */
 struct mthread *main_thread = 0;
 
+static void run_threads(void);
+
+#if defined(__EMSCRIPTEN__)
+/* Set when the main thread has finished, but the other threads keep running
+ * because JavaScript callbacks keep the program alive. */
+static int main_done = 0;
+
+EM_JS(void, mhs_js_set_timer, (int ms), {
+  if (typeof setTimeout !== "function") return;
+  if (Module.mhsjs.timer) clearTimeout(Module.mhsjs.timer);
+  Module.mhsjs.timer = setTimeout(function() { Module.mhsjs.timer = null; _mhs_js_run_threads(); }, ms);
+});
+
+/* Arrange for mhs_js_run_threads() to be called from a JavaScript timer when
+ * the earliest threadDelay expires. */
+static void
+arm_timer(void)
+{
+  if (!timeq.mq_head)
+    return;
+  CLOCK_T dly = timeq.mq_head->mt_at - CLOCK_GET();
+  if (dly < 0)
+    dly = 0;
+  mhs_js_set_timer((int)(dly / 1000));
+}
+
+/* Called from JavaScript (a timer) to run threads whose delay has expired. */
+EMSCRIPTEN_KEEPALIVE void
+mhs_js_run_threads(void)
+{
+  if (main_thread)              /* the threads are already running (or paused) */
+    return;
+  check_timeq();
+  if (!runq.mq_head) {
+    arm_timer();
+    return;
+  }
+  main_thread = runq.mq_head;   /* mark the threading system as active */
+  main_done = 1;
+  run_threads();
+}
+#endif  /* __EMSCRIPTEN__ */
+
 void
 start_exec(NODEPTR root)
 {
@@ -1959,6 +2002,14 @@ start_exec(NODEPTR root)
   mt = new_thread(new_ap(root, combWorld)); /* main thread */
   mt->mt_id = MAIN_THREAD;                  /* make it the main thread in case this is foreign export calling */
   main_thread = mt;
+  run_threads();
+}
+
+/* Run threads until the main thread is done. */
+static void
+run_threads(void)
+{
+  struct mthread *mt;
 
   switch(setjmp(sched)) {
   case mt_main:
@@ -1995,8 +2046,22 @@ start_exec(NODEPTR root)
   }
 #endif  /* THREAD_DEBUG */
   for(;;) {
-    if (!runq.mq_head)
+    if (!runq.mq_head) {
+#if defined(__EMSCRIPTEN__)
+      if (main_done) {
+        /* The main thread is done, so run the other threads until they are all
+         * blocked, then return to JavaScript; a timer resumes them if needed. */
+        check_timeq();
+        if (runq.mq_head)
+          continue;
+        arm_timer();
+        main_done = 0;
+        main_thread = 0;
+        return;
+      }
+#endif  /* __EMSCRIPTEN__ */
       pause_exec();
+    }
     mt = runq.mq_head;          /* front thread */
     if (!mt)                    /* this should never happen */
       ERR("no threads");
@@ -2022,12 +2087,20 @@ start_exec(NODEPTR root)
     /* XXX mt_mval, mt_thrown */
 
     if (mt->mt_id == MAIN_THREAD) {
-      main_thread = 0;
 #if THREAD_DEBUG
       if (thread_trace) {
         printf("start_exec: main thread done\n");
       }
 #endif  /* THREAD_DEBUG */
+#if defined(__EMSCRIPTEN__)
+      if (mhs_js_keep_alive) {
+        /* JavaScript callbacks exist, so the program is not over (this may be a
+         * callback that has woken another thread): keep running the other threads. */
+        main_done = 1;
+        continue;
+      }
+#endif  /* __EMSCRIPTEN__ */
+      main_thread = 0;
       return;                   /* when the main thread dies it's all over */
     }
   }

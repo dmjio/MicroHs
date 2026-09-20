@@ -450,8 +450,10 @@ with `safe` it is raised as a `JSException`, and with `interruptible` the code i
 which is added to the C compiler flags automatically.
 When a program has created callbacks the JavaScript runtime stays alive after `main` returns, so the callbacks
 can be invoked by JavaScript events.
-Also, when all Haskell threads are blocked (e.g., in `takeMVar` waiting for a callback, or in `threadDelay`)
-the runtime yields to the JavaScript event loop (with ASYNCIFY) so the callbacks can run.
+The other Haskell threads keep running too: after `main` (or a callback) has finished, the runnable threads
+run until they are all blocked, and a thread in `threadDelay` is resumed by a JavaScript timer.
+When `main` itself is blocked (e.g., in `takeMVar` waiting for a callback) the runtime yields to the
+JavaScript event loop with ASYNCIFY so the callbacks can run.
 A callback runs to completion when it is called, so it must not block or call an `interruptible` import.
 See `tests/JSVal.hs` for examples.
 The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)
