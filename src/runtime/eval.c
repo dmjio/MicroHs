@@ -1716,11 +1716,28 @@ pause_exec(void)
         /* usleep() can be unreliable, so sleep shorter than the delay */
         dly /= 4;
         if (dly < 50) dly = 50;
+#if defined(__EMSCRIPTEN__)
+        if (emscripten_has_asyncify()) {
+          /* Yield to the JavaScript event loop while waiting, so that JavaScript
+           * callbacks into Haskell can run. */
+          emscripten_sleep((unsigned int)(dly / 1000 + 1));
+        } else
+#endif  /* __EMSCRIPTEN__ */
         CLOCK_SLEEP((useconds_t)dly);
       }
       check_timeq();
     }
   } else {
+#if defined(__EMSCRIPTEN__)
+    if (mhs_js_keep_alive && emscripten_has_asyncify()) {
+      /* All threads are blocked, but there are JavaScript callbacks into Haskell
+       * (e.g., a promise handler doing putMVar), so yield to the JavaScript event
+       * loop until one of them makes a thread runnable. */
+      while (!runq.mq_head)
+        emscripten_sleep(1);
+      return;
+    }
+#endif  /* __EMSCRIPTEN__ */
 #if THREAD_DEBUG
     if (0) {
       dump_q("runq", runq);
@@ -7124,6 +7141,10 @@ EMSCRIPTEN_KEEPALIVE int
 mhs_js_callback(uvalue_t sp, int ret, int nargs, int *args)
 {
   int r = 0;
+  /* The callback runs to completion on the current stack, so it must not be
+   * preempted (there may be no runnable thread while the runtime is paused). */
+  int s = glob_slice;
+  glob_slice = 1000000000;
   gc_check(2 * nargs + 8);
   ffe_push(deref_stableptr(sp));
   for (int i = 0; i < nargs; i++) {
@@ -7136,6 +7157,7 @@ mhs_js_callback(uvalue_t sp, int ret, int nargs, int *args)
     (void)ffe_exec();
   }
   ffe_pop();
+  glob_slice = s;
   /* Flush standard handles in case there is some BFILE buffering */
   flushb((BFILE*)FORPTR(comb_stdout)->payload.string);
   flushb((BFILE*)FORPTR(comb_stderr)->payload.string);

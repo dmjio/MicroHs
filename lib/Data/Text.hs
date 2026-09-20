@@ -59,9 +59,43 @@ module Data.Text(
   count,
   index,
   chunksOf,
+  breakOnEnd,
+  center,
+  compareLength,
+  dropEnd,
+  find,
+  findIndex,
+  group,
+  groupBy,
+  inits,
+  tails,
+  intersperse,
+  justifyLeft,
+  justifyRight,
+  mapAccumL,
+  mapAccumR,
+  maximum,
+  minimum,
+  partition,
+  scanl,
+  scanr,
+  split,
+  splitAt,
+  takeEnd,
+  toCaseFold,
+  transpose,
+  unfoldr,
+  unfoldrN,
+  unsnoc,
+  zipWith,
+  foldl1,
+  foldr1,
+  scanl1,
+  scanr1,
   ) where
 import qualified Prelude(); import MiniPrelude hiding(head, tail, null, length, words, map,
-  concatMap, foldl, unwords, any, all, filter, reverse, last, init, elem, zip, span, break)
+  concatMap, foldl, unwords, any, all, filter, reverse, last, init, elem, zip, span, break,
+  maximum, minimum, scanl, scanr, splitAt, zipWith, foldl1, foldr1, scanl1, scanr1)
 import qualified Data.Char as C
 import Control.DeepSeq.Class
 import qualified Data.List as L
@@ -295,3 +329,120 @@ index t i = unpack t L.!! i
 chunksOf :: Int -> Text -> [Text]
 chunksOf n t | null t = []
              | otherwise = take n t : chunksOf n (drop n t)
+
+breakOnEnd :: Text -> Text -> (Text, Text)
+breakOnEnd p t = case breakOn (reverse p) (reverse t) of (a, b) -> (reverse b, reverse a)
+
+replicateChar :: Int -> Char -> Text
+replicateChar n c = pack (L.replicate n c)
+
+center :: Int -> Char -> Text -> Text
+center k c t | len >= k  = t
+             | otherwise = replicateChar l c `append` t `append` replicateChar r c
+  where len = length t
+        d = k - len
+        r = d `quot` 2
+        l = d - r
+
+justifyLeft :: Int -> Char -> Text -> Text
+justifyLeft k c t | len >= k  = t
+                  | otherwise = t `append` replicateChar (k - len) c
+  where len = length t
+
+justifyRight :: Int -> Char -> Text -> Text
+justifyRight k c t | len >= k  = t
+                   | otherwise = replicateChar (k - len) c `append` t
+  where len = length t
+
+compareLength :: Text -> Int -> Ordering
+compareLength t n = compare (length t) n
+
+dropEnd :: Int -> Text -> Text
+dropEnd n = pack . L.reverse . L.drop n . L.reverse . unpack
+
+takeEnd :: Int -> Text -> Text
+takeEnd n = pack . L.reverse . L.take n . L.reverse . unpack
+
+find :: (Char -> Bool) -> Text -> Maybe Char
+find p = L.find p . unpack
+
+findIndex :: (Char -> Bool) -> Text -> Maybe Int
+findIndex p = L.findIndex p . unpack
+
+group :: Text -> [Text]
+group = L.map pack . L.group . unpack
+
+groupBy :: (Char -> Char -> Bool) -> Text -> [Text]
+groupBy f = L.map pack . L.groupBy f . unpack
+
+inits :: Text -> [Text]
+inits = L.map pack . L.inits . unpack
+
+tails :: Text -> [Text]
+tails = L.map pack . L.tails . unpack
+
+intersperse :: Char -> Text -> Text
+intersperse c = pack . L.intersperse c . unpack
+
+mapAccumL :: (a -> Char -> (a, Char)) -> a -> Text -> (a, Text)
+mapAccumL f z t = case L.mapAccumL f z (unpack t) of (a, s) -> (a, pack s)
+
+mapAccumR :: (a -> Char -> (a, Char)) -> a -> Text -> (a, Text)
+mapAccumR f z t = case L.mapAccumR f z (unpack t) of (a, s) -> (a, pack s)
+
+maximum :: Text -> Char
+maximum = L.maximum . unpack
+
+minimum :: Text -> Char
+minimum = L.minimum . unpack
+
+partition :: (Char -> Bool) -> Text -> (Text, Text)
+partition p t = case L.partition p (unpack t) of (a, b) -> (pack a, pack b)
+
+scanl :: (Char -> Char -> Char) -> Char -> Text -> Text
+scanl f z = pack . L.scanl f z . unpack
+
+scanr :: (Char -> Char -> Char) -> Char -> Text -> Text
+scanr f z = pack . L.scanr f z . unpack
+
+-- | Split on characters satisfying the predicate.
+split :: (Char -> Bool) -> Text -> [Text]
+split p t = L.map pack (go (unpack t))
+  where go s = case L.break p s of
+                 (a, [])       -> [a]
+                 (a, _ : rest) -> a : go rest
+
+splitAt :: Int -> Text -> (Text, Text)
+splitAt n t = case L.splitAt n (unpack t) of (a, b) -> (pack a, pack b)
+
+toCaseFold :: Text -> Text
+toCaseFold = toLower
+
+transpose :: [Text] -> [Text]
+transpose = L.map pack . L.transpose . L.map unpack
+
+unfoldr :: (a -> Maybe (Char, a)) -> a -> Text
+unfoldr f = pack . L.unfoldr f
+
+unfoldrN :: Int -> (a -> Maybe (Char, a)) -> a -> Text
+unfoldrN n f = pack . L.take n . L.unfoldr f
+
+unsnoc :: Text -> Maybe (Text, Char)
+unsnoc t = case unpack t of
+             [] -> Nothing
+             s  -> Just (pack (L.init s), L.last s)
+
+zipWith :: (Char -> Char -> Char) -> Text -> Text -> Text
+zipWith f a b = pack (L.zipWith f (unpack a) (unpack b))
+
+foldl1 :: (Char -> Char -> Char) -> Text -> Char
+foldl1 f = L.foldl1 f . unpack
+
+foldr1 :: (Char -> Char -> Char) -> Text -> Char
+foldr1 f = L.foldr1 f . unpack
+
+scanl1 :: (Char -> Char -> Char) -> Text -> Text
+scanl1 f = pack . L.scanl1 f . unpack
+
+scanr1 :: (Char -> Char -> Char) -> Text -> Text
+scanr1 f = pack . L.scanr1 f . unpack
