@@ -72,7 +72,7 @@ main = do
                   _   -> mhsError usage
 
 usage :: String
-usage = "Usage: mhs [-h|?] [--help] [--version] [--numeric-version] [-v] [-q] [-l] [-s] [-r] [-C[R|W]] [-XCPP] [-DDEF] [-IPATH] [-T] [-z] [-b64] [-iPATH] [-oFILE] [-a[PATH]] [-L[FILE|PKG]] [-PPKG] [-Q PKG [DIR]] [-pFILE] [-tTARGET] [-optc OPTION] [-optl OPTION] [-ddump-PASS] [MODULENAME..|FILE]"
+usage = "Usage: mhs [-h|?] [--help] [--version] [--numeric-version] [-v] [-q] [-l] [-s] [-r] [-C[R|W]] [-XCPP] [-DDEF] [-IPATH] [-T] [-z] [-b64] [-iPATH] [-oFILE] [-a[PATH]] [-L[FILE|PKG]] [-PPKG] [-Q PKG [DIR]] [-pFILE] [-tTARGET] [-optc OPTION] [-optl OPTION] [-js FILE] [-ddump-PASS] [MODULENAME..|FILE]"
 
 longUsage :: String
 longUsage = usage ++ "\nOptions:\n" ++ details
@@ -114,6 +114,7 @@ longUsage = usage ++ "\nOptions:\n" ++ details
       \                   Targets can be defined in targets.conf\n\
       \-optc OPTION       Options for the C compiler\n\
       \-optl OPTION       Options passed by mhs to the C compiler for the linker\n\
+      \-js FILE           JavaScript file to embed in the output (for targets with a js option)\n\
       \--stdin            Use stdin in interactive system\n\
       \-pgmF CMD          Use CMD for the -F preprocessor\n\
       \-optF FLAG         Pass the FLAG to the -F preprocessor\n\
@@ -147,6 +148,8 @@ decodeArgs f mdls (arg:args) =
                 -> decodeArgs f{cArgs = cArgs f ++ [s]} mdls args'
     "-optl" | s : args' <- args
                 -> decodeArgs f{lArgs = lArgs f ++ [s]} mdls args'
+    "-js"   | s : args' <- args
+                -> decodeArgs f{jsFiles = jsFiles f ++ [s]} mdls args'
     "-optF" | s : args' <- args
                 -> decodeArgs f{fArgs = fArgs f ++ [s]} mdls args'
     "-pgmF" | s : args' <- args
@@ -213,6 +216,7 @@ readTarget flags dir = do
                  , tCCLibs  = fromMaybe ""     $ lookup "cclibs"  cs
                  , tConf    = fromMaybe "unix" $ lookup "conf"    cs
                  , tOut     = fromMaybe "-o"   $ lookup "cout"    cs
+                 , tJS      = fromMaybe ""     $ lookup "js"      cs
                  }
 
 mainBuildPkg :: Flags -> String -> [String] -> IO ()
@@ -387,15 +391,23 @@ mainCompileC flags pkgs infile = do
   let dir = mhsdir flags
       incDirs = map (convertToInclude "include") ppkgs
       cDirs   = map (convertToInclude "cbits") ppkgs
+      jsDirs  = map (convertToInclude "jsbits") ppkgs
       outFile = output flags
   incDirs' <- filterM doesDirectoryExist incDirs
   cDirs'   <- filterM doesDirectoryExist cDirs
+  jsDirs'  <- filterM doesDirectoryExist jsDirs
+  -- JavaScript files from packages (jsbits directory) and the command line (-js)
+  pkgJs <- concat <$> mapM (\ d -> map (d </>) . filter (".js" `isSuffixOf`) . sort <$> listDirectory d) jsDirs'
   -- print (map fst $ getPathPkgs cash, (incDirs, incDirs'), (cDirs, cDirs'))
   let incs = unwords $ map ("-I" ++) incDirs'
       defs = "-D__MHS__"
       cpps = concatMap (\ a -> "'" ++ a ++ "' ") (cppArgs flags)  -- Use all CPP args from the command line
       rtdir = dir ++ "/src/runtime"
   tgt <- readTarget flags dir
+  let jsFs = pkgJs ++ jsFiles flags
+      jsOpts = if null (tJS tgt) then [] else concatMap (\ f -> [tJS tgt, f]) jsFs
+  when (not (null jsFs) && null (tJS tgt) && verbosityGT flags 0) $
+    putStrLn $ "Warning: JavaScript files ignored, target " ++ tName tgt ++ " has no js option: " ++ unwords jsFs
   let optls = concatMap pkgOptl poptls -- optl from pkgs
       cmd = unwords $ [tCC tgt,
                        tCCFlags tgt,
@@ -407,6 +419,7 @@ mainCompileC flags pkgs infile = do
                        cArgs flags ++
                        lArgs flags ++
                        optls ++
+                       jsOpts ++
                        map (++ "/*.c") cDirs' ++
                       [ rtdir </> "main.c" | not (noLink flags) ] ++
                       [ rtdir </> "eval.c",

@@ -453,6 +453,13 @@ can be invoked by JavaScript events.
 See `tests/JSVal.hs` for examples.
 The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)
 generate JavaScript only (`-sWASM=0`) instead of WebAssembly; the JavaScript FFI works the same way.
+The targets `browser` and `browser_js` are for the browser (no node file system access).
+
+JavaScript files can be embedded in the generated output with `-js FILE` (e.g., a JavaScript runtime
+library used via the FFI).  A target supports this if it has a `js` key in `targets.conf` giving the
+C compiler option to use (`js = "--pre-js"` for emscripten); for other targets the files are ignored.
+Installed packages can also carry JavaScript files, in a `jsbits` directory next to the package
+(mcabal puts the `js-sources` of a package there), these are embedded in the same way.
 
 ### Records
 MicroHs implements the record dot extensions.

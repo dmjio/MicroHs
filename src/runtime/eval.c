@@ -7179,7 +7179,7 @@ from_t mhs_scalbnf(int s) { return mhs_from_Float(s, 2, scalbnf(mhs_to_Float(s, 
 from_t mhs_js_debug(int s) { EM_ASM({ console.log(UTF8ToString($0)) }, mhs_to_Ptr(s, 0)); return mhs_from_Unit(s, 1); }
 from_t mhs_js_eval_run(int s) { EM_ASM({ eval(UTF8ToString($0)) }, mhs_to_Ptr(s, 0)); return mhs_from_Unit(s, 1); }
 from_t mhs_js_eval_call(int s) { return mhs_from_Ptr(s, 1, EM_ASM_PTR({ return stringToNewUTF8(JSON.stringify(eval(UTF8ToString($0)))) }, mhs_to_Ptr(s, 0))); }
-from_t mhs_js_set_haskellCallback(int s) { EM_ASM({ _haskellCallback = $0 }, mhs_to_Int(s, 0)); return mhs_from_Unit(s, 1); }
+from_t mhs_js_set_haskellCallback(int s) { EM_ASM({ globalThis._haskellCallback = $0 }, mhs_to_Int(s, 0)); return mhs_from_Unit(s, 1); }
 from_t mhs_js_free_jsval(int s) { EM_ASM({ Module.mhsjs.freeJSVal($0) }, mhs_to_JSVal(s, 0)); return mhs_from_Unit(s, 1); }
 from_t mhs_js_take_exn(int s);
 from_t mhs_js_exn_string(int s);

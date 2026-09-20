@@ -30,6 +30,7 @@ data TTarget = TTarget
   , tCCLibs  :: String
   , tConf    :: String
   , tOut     :: String  -- flag to set output file
+  , tJS      :: String  -- flag to embed a JavaScript file (empty if not possible)
   }
 
 findTarget :: String -> [Target] -> Maybe Target
