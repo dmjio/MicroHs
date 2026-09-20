@@ -458,7 +458,9 @@ A callback runs to completion when it is called, so it must not block or call an
 See `tests/JSVal.hs` for examples.
 The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)
 generate JavaScript only (`-sWASM=0`) instead of WebAssembly; the JavaScript FFI works the same way.
-The targets `browser` and `browser_js` are for the browser (no node file system access).
+The targets `browser` and `browser_js` are for the browser (no node file system access);
+they use a 4M cell heap (about 60MB) instead of the default 50M, so that garbage collection (which also
+releases the JavaScript values referenced from Haskell) happens regularly; change it with `-optc -DHEAP_CELLS=N`.
 
 JavaScript files can be embedded in the generated output with `-js FILE` (e.g., a JavaScript runtime
 library used via the FFI).  A target supports this if it has a `js` key in `targets.conf` giving the

@@ -27,6 +27,11 @@
 #if defined(__EMSCRIPTEN__)
 #include "emscripten.h"
 extern int mhs_js_keep_alive;
+/* JavaScript values referenced by JSVal handles are only released by the GC
+ * finalizers, so a GC is forced after this many new handles even if the heap
+ * is not full (a large heap could otherwise keep them alive for a long time). */
+#define JSVAL_GC_LIMIT 100000
+extern uvalue_t num_jsval_alloc;
 extern int mhs_js_exn_handle;
 EM_JS(char *, mhs_js_exn_cstring, (int k), {
   var v = Module.mhsjs.getJSVal(k);
@@ -1192,7 +1197,11 @@ handle_sigint(int s)
 INLINE void
 gc_check(size_t k)
 {
-  if (k < num_free)
+  if (k < num_free
+#if defined(__EMSCRIPTEN__)
+      && num_jsval_alloc < JSVAL_GC_LIMIT
+#endif
+      )
     return;
 #if WANT_STDIO
   if (verbose > 1)
@@ -3013,6 +3022,9 @@ gc(void)
   sweep_weaks();
 
   gc_mark_time += GETTIMEMILLI();
+#if defined(__EMSCRIPTEN__)
+  num_jsval_alloc = 0;
+#endif
 
   if (num_marked > max_num_marked)
     max_num_marked = num_marked;
@@ -7128,6 +7140,7 @@ mhs_to_HsStablePtr(stackptr_t stk, int n)
  *  - creates JavaScript functions that call back into Haskell via a stable pointer.
  */
 int mhs_js_keep_alive = 0;
+uvalue_t num_jsval_alloc = 0;   /* JSVal handles created since the last GC */
 
 EM_JS(void, mhs_js_drop, (int k), { Module.mhsjs.dropJSVal(k); });
 
@@ -7141,6 +7154,7 @@ from_t
 mhs_from_JSVal(stackptr_t stk, int n, int k)
 {
   NODEPTR r = TOP(0);
+  num_jsval_alloc++;
   struct forptr *fp = mkForPtrP((void *)(intptr_t)k);
   fp->finalizer->final = (HsFunPtr)mhs_jsval_finalizer;
   fp->finalizer->fptype = FP_JSVAL;

@@ -27,14 +27,14 @@ conf = "unix"
 [browser]
 cc = "emcc"
 js = "--pre-js"
-ccflags = "-O3 -sENVIRONMENT=web -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString,lengthBytesUTF8,stringToUTF8,HEAPU8,HEAP32,HEAPF64 -sALLOW_MEMORY_GROWTH -sTOTAL_STACK=5MB -sSINGLE_FILE -DUSE_SYSTEM_RAW -sEXIT_RUNTIME -Wno-address-of-packed-member"
+ccflags = "-O3 -sENVIRONMENT=web -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString,lengthBytesUTF8,stringToUTF8,HEAPU8,HEAP32,HEAPF64 -sALLOW_MEMORY_GROWTH -sTOTAL_STACK=5MB -sSINGLE_FILE -DUSE_SYSTEM_RAW -sEXIT_RUNTIME -Wno-address-of-packed-member -DHEAP_CELLS=4000000"
 cclibs = "-lm"
 conf = "unix"
 
 [browser_js]
 cc = "emcc"
 js = "--pre-js"
-ccflags = "-O3 -sWASM=0 -sENVIRONMENT=web -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString,lengthBytesUTF8,stringToUTF8,HEAPU8,HEAP32,HEAPF64 -sALLOW_MEMORY_GROWTH -sTOTAL_STACK=5MB -sSINGLE_FILE -DUSE_SYSTEM_RAW -sEXIT_RUNTIME -Wno-address-of-packed-member"
+ccflags = "-O3 -sWASM=0 -sENVIRONMENT=web -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString,lengthBytesUTF8,stringToUTF8,HEAPU8,HEAP32,HEAPF64 -sALLOW_MEMORY_GROWTH -sTOTAL_STACK=5MB -sSINGLE_FILE -DUSE_SYSTEM_RAW -sEXIT_RUNTIME -Wno-address-of-packed-member -DHEAP_CELLS=4000000"
 cclibs = "-lm"
 conf = "unix"
 
