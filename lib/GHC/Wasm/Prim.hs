@@ -52,13 +52,6 @@ import System.IO.Unsafe(unsafePerformIO)
 -- | A JavaScript string.
 newtype JSString = JSString JSVal
 
-instance Eq JSString where
-  JSString x == JSString y = js_eq x y
-
-instance Show JSString where
-  showsPrec p s = showsPrec p (fromJSString s)
-
-foreign import javascript "$1 === $2" js_eq :: JSVal -> JSVal -> Bool
 
 -- JSException is defined in Control.Exception.Internal, since the runtime raises it.
 

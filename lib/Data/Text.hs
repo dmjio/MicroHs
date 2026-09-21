@@ -83,6 +83,7 @@ module Data.Text(
   splitAt,
   takeEnd,
   toCaseFold,
+  toTitle,
   transpose,
   unfoldr,
   unfoldrN,
@@ -450,3 +451,12 @@ scanl1 f = pack . L.scanl1 f . unpack
 
 scanr1 :: (Char -> Char -> Char) -> Text -> Text
 scanr1 f = pack . L.scanr1 f . unpack
+
+-- | Upper-case the first letter of each word, lower-case the rest.
+toTitle :: Text -> Text
+toTitle = pack . go True . unpack
+  where go _ [] = []
+        go start (c:cs)
+          | C.isSpace c = c : go True cs
+          | start     = C.toUpper c : go False cs
+          | otherwise = C.toLower c : go False cs

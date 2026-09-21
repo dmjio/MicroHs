@@ -48,8 +48,8 @@ main = do
   print (add 3 4)
   print (mul 3 4)
   print (gt3 2, gt3 5)
-  print (boolStr True, boolStr False)
-  print (charStr 'x', charStr '\955')
+  print (fromJSString (boolStr True), fromJSString (boolStr False))
+  print (fromJSString (charStr 'x'), fromJSString (charStr '\955'))
   print (firstChar (toJSString "abc"), firstChar (toJSString "\955"))
   print (sumTo 100)
 
@@ -57,20 +57,20 @@ main = do
   stringify o >>= putStrLn . fromJSString
   a <- getProp o (toJSString "a")
   jsValToInt a >>= print
-  typeOf a >>= print
-  typeOf o >>= print
+  typeOf a >>= print . fromJSString
+  typeOf o >>= print . fromJSString
   n <- getProp o (toJSString "nothing")
   print (isUndefined n, isNull n, isUndefined a, isNull jsNull)
   setProp o (toJSString "b") jsNull
-  stringify o >>= print
-  print (toJSString "abc" == toJSString "abc", toJSString "abc" == toJSString "abd")
+  stringify o >>= print . fromJSString
+  print (fromJSString (toJSString "abc") == "abc", fromJSString (toJSString "abc") == "abd")
   print (textFromJSString (textToJSString "text \955"))
 
   -- synchronous callbacks
   dbl <- syncCallback1' $ \ v -> do
     i <- jsValToInt v
     intToJSVal (i * 2)
-  mapJS dbl >>= stringify >>= print
+  mapJS dbl >>= stringify >>= print . fromJSString
   r <- newIORef (0::Int)
   cnt <- syncCallback2 $ \ x y -> do
     i <- jsValToInt x
@@ -85,7 +85,7 @@ main = do
     v <- mapJS dbl
     stringify v >>= putStrLn . ("nested: " ++) . fromJSString
     strToJSVal (toJSString "nested done")
-  call0 nest >>= stringify >>= print
+  call0 nest >>= stringify >>= print . fromJSString
 
   -- handles are dropped when JSVals are garbage collected
   s0 <- tableSize
