@@ -5,7 +5,7 @@ TMHS=$(MHS) $(MHSTARGET) $(MHSOUTPUT)
 EVAL=../bin/mhseval +RTS -H1M -RTS
 .PHONY: test nfib clean errtest alltest cache info
 
-alltest: info test errtest testforimp testforexp testforimpexp testapplysp testpipenonblockio testpreprocessorpaths
+alltest: info test errtest testforimp testjsnative testforexp testforimpexp testapplysp testpipenonblockio testpreprocessorpaths
 # interactivetest
 
 cache:
@@ -112,6 +112,7 @@ test:
 	$(TMHS) ThrSt      && $(EVAL) > ThrSt.out      && diff ThrSt.ref ThrSt.out
 	$(TMHS) Throw      && $(EVAL) > Throw.out      && diff Throw.ref Throw.out
 	$(TMHS) ThrowMVar  && $(EVAL) > ThrowMVar.out  && diff ThrowMVar.ref ThrowMVar.out
+	$(TMHS) ThrowToSync && $(EVAL) > ThrowToSync.out && diff ThrowToSync.ref ThrowToSync.out
 	$(TMHS) RtsExn     && $(EVAL) > RtsExn.out     && diff RtsExn.ref RtsExn.out
 	$(TMHS) Mask       && $(EVAL) > Mask.out       && diff Mask.ref Mask.out
 	$(TMHS) EmptyData  && $(EVAL) > EmptyData.out  && diff EmptyData.ref EmptyData.out
@@ -136,6 +137,11 @@ testpreprocessorpaths:
 testforimp:
 	$(TMHS) ForeignC -of.exe && ./f.exe > ForeignC.out && diff ForeignC.ref ForeignC.out
 
+# A program that creates JavaScript callbacks also compiles (and runs, as long as it
+# does not use them) for a native target.
+testjsnative:
+	$(TMHS) JSNative -of.exe && ./f.exe > JSNative.out && diff JSNative.ref JSNative.out
+
 testforimpjs:
 	$(TMHS) -temscripten ForImpJS -of.js && node f.js > ForImpJS.out && diff ForImpJS.ref ForImpJS.out
 
@@ -145,6 +151,12 @@ testforexpjs:
 	$(TMHS) -c ForExpJS -oForExpJS_c.c
 	emcc -O1 -I../src/runtime -I../src/runtime/unix -DUSE_SYSTEM_RAW -Wno-address-of-packed-member ForExpJS_c.c ../src/runtime/eval.c -lm -sEXPORTED_FUNCTIONS=_mhs_init -sALLOW_MEMORY_GROWTH -sTOTAL_STACK=5MB -sSINGLE_FILE -sMODULARIZE=1 -sEXPORT_NAME=FEJS -ofejs.mjs
 	node ForExpJS.mjs > ForExpJS.out && diff ForExpJS.ref ForExpJS.out && rm -f fejs.mjs ForExpJS_c.c
+
+testjsval:
+	MHSDIR=.. $(TMHS) -temscripten JSVal -of.js && node f.js > JSVal.out && diff JSVal.ref JSVal.out
+
+testjscallback:
+	MHSDIR=.. $(TMHS) -temscripten JSCallback -of.js && node f.js > JSCallback.out 2>&1 && diff JSCallback.ref JSCallback.out
 
 testforexp:
 	$(TMHS) -c -optc --shared -optc -fPIC ForExp -oForExpHs.so && $(CC) -lm ForExp.c ForExpHs.so -Wl,-rpath,'$$ORIGIN' -o ForExp.exe && ./ForExp.exe > ForExp.out && diff ForExp.ref ForExp.out

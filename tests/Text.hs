@@ -47,3 +47,7 @@ main = do
   print $ decodeUtf16BE (encodeUtf16BE text) == text
   print $ decodeUtf32LE (encodeUtf32LE text) == text
   print $ decodeUtf32BE (encodeUtf32BE text) == text
+
+  -- chunksOf, and a non-positive size gives no chunks (as in the text package)
+  print $ T.chunksOf 2 (pack "abcde")
+  print $ T.chunksOf 0 (pack "abc")
