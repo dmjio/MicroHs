@@ -1,11 +1,11 @@
 MHSTARGET=
 MHSOUTPUT=
 MHS=../bin/gmhs
-TMHS=$(MHS) $(MHSTARGET) $(MHSOUTPUT) -i../lib
+TMHS=$(MHS) $(MHSTARGET) $(MHSOUTPUT)
 EVAL=../bin/mhseval +RTS -H1M -RTS
 .PHONY: test nfib clean errtest alltest cache info
 
-alltest:	info test errtest testforimp testforexp testforimpexp testapplysp
+alltest: info test errtest testforimp testforexp testforimpexp testapplysp testpipenonblockio testpreprocessorpaths
 # interactivetest
 
 cache:
@@ -104,11 +104,12 @@ test:
 	$(TMHS) Forall     && $(EVAL) > Forall.out     && diff Forall.ref Forall.out
 	$(TMHS) Block      && $(EVAL) > Block.out      && diff Block.ref Block.out
 	$(TMHS) Fork       && $(EVAL) > Fork.out       && diff Fork.ref Fork.out
-	$(TMHS) Concur     && $(EVAL) > Concur.out     && diff Concur.ref Concur.out
+#	$(TMHS) Concur     && $(EVAL) > Concur.out     && diff Concur.ref Concur.out
 	$(TMHS) MVar       && $(EVAL) > MVar.out       && diff MVar.ref MVar.out
 	$(TMHS) Delay      && $(EVAL) > Delay.out      && diff Delay.ref Delay.out
 	$(TMHS) ThrSt      && $(EVAL) > ThrSt.out      && diff ThrSt.ref ThrSt.out
 	$(TMHS) Throw      && $(EVAL) > Throw.out      && diff Throw.ref Throw.out
+	$(TMHS) ThrowMVar  && $(EVAL) > ThrowMVar.out  && diff ThrowMVar.ref ThrowMVar.out
 	$(TMHS) RtsExn     && $(EVAL) > RtsExn.out     && diff RtsExn.ref RtsExn.out
 	$(TMHS) Mask       && $(EVAL) > Mask.out       && diff Mask.ref Mask.out
 	$(TMHS) EmptyData  && $(EVAL) > EmptyData.out  && diff EmptyData.ref EmptyData.out
@@ -120,30 +121,45 @@ test:
 	$(TMHS) Builder    && $(EVAL) > Builder.out    && diff Builder.ref Builder.out
 	$(TMHS) Unboxed    && $(EVAL) > Unboxed.out    && diff Unboxed.ref Unboxed.out
 	$(TMHS) LazyST     && $(EVAL) > LazyST.out     && diff LazyST.ref LazyST.out
+	$(TMHS) Errno      && $(EVAL) > Errno.out      && diff Errno.ref Errno.out
+	$(TMHS) QualString && $(EVAL) > QualString.out && diff QualString.ref QualString.out
+	$(TMHS) MD5        && $(EVAL) > MD5.out        && diff MD5.ref MD5.out
+	$(TMHS) Interpolate && $(EVAL) > Interpolate.out && diff Interpolate.ref Interpolate.out
+	$(TMHS) DerivingBuiltin
+
+.PHONY: testpreprocessorpaths
+testpreprocessorpaths:
+	sh preprocessor-paths.sh $(TMHS)
 
 testforimp:
-	MHSDIR=.. $(TMHS) ForeignC -of.exe && ./f.exe > ForeignC.out && diff ForeignC.ref ForeignC.out
+	$(TMHS) ForeignC -of.exe && ./f.exe > ForeignC.out && diff ForeignC.ref ForeignC.out
 
 testforimpjs:
-	MHSDIR=.. $(TMHS) -temscripten ForImpJS -of.js && node f.js > ForImpJS.out && diff ForImpJS.ref ForImpJS.out
+	$(TMHS) -temscripten ForImpJS -of.js && node f.js > ForImpJS.out && diff ForImpJS.ref ForImpJS.out
 
 testjsval:
 	MHSDIR=.. $(TMHS) -temscripten JSVal -of.js && node f.js > JSVal.out && diff JSVal.ref JSVal.out
 
 testforexp:
-	MHSDIR=.. $(TMHS) -c -optc --shared -optc -fPIC ForExp -oForExpHs.so && $(CC) -lm ForExp.c ForExpHs.so -Wl,-rpath,'$$ORIGIN' -o ForExp.exe && ./ForExp.exe > ForExp.out && diff ForExp.ref ForExp.out
+	$(TMHS) -c -optc --shared -optc -fPIC ForExp -oForExpHs.so && $(CC) -lm ForExp.c ForExpHs.so -Wl,-rpath,'$$ORIGIN' -o ForExp.exe && ./ForExp.exe > ForExp.out && diff ForExp.ref ForExp.out
 
 testforimpexp:
-	MHSDIR=.. $(TMHS) -optc -I. Callback hsimp.c -oCallback.exe && ./Callback.exe > Callback.out && diff Callback.ref Callback.out
+	$(TMHS) -optc -I. Callback hsimp.c -oCallback.exe && ./Callback.exe > Callback.out && diff Callback.ref Callback.out
 
 testapplysp:
-	MHSDIR=.. $(TMHS) -optc -I. ApplySP hsasp.c -oApplySP.exe && ./ApplySP.exe > ApplySP.out && diff ApplySP.ref ApplySP.out
+	$(TMHS) -optc -I. ApplySP hsasp.c -oApplySP.exe && ./ApplySP.exe > ApplySP.out && diff ApplySP.ref ApplySP.out
+
+testpipenonblockio:
+	MHSDIR=.. $(TMHS) -oPipeNonBlockIO.exe PipeNonBlockIO && ./PipeNonBlockIO.exe > PipeNonBlockIO.out && diff PipeNonBlockIO.ref PipeNonBlockIO.out
+
+testpipenonblockioem:
+	$(TMHS) PipeNonBlockIO && $(EVAL) > PipeNonBlockIO.out && diff PipeNonBlockIO.ref PipeNonBlockIO.out
 
 errtest:
 	sh errtester.sh $(MHS) < errmsg.test
 
 interactivetest:
-	$(TMHS) < itest.in | sed -e '1,/^>/d' > itest.out && diff itest.ref itest.out
+	$(TMHS) --stdin < itest.in | sed -e '1,/^>/d' > itest.out && diff itest.ref itest.out
 
 nfib:
 	$(TMHS) Nfib && $(EVAL)

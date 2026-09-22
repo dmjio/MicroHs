@@ -3,7 +3,7 @@ name: MicroHs Nightly
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Every day at 04:00 UTC
+    - cron: '0 3 * * *'  # Every day at 03:00 UTC
 
 jobs:
   build-linux-x86_64:
@@ -91,7 +91,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: aarch64
-        branch: v3.15
         packages: >
           build-base
           gcc
@@ -111,7 +110,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: s390x
-        branch: v3.15
         packages: >
           build-base
           gcc
@@ -131,7 +129,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: x86
-        branch: v3.15
         packages: >
           build-base
           gcc
@@ -151,7 +148,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: armv7
-        branch: v3.15
         packages: >
           build-base
           gcc
@@ -171,7 +167,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: riscv64
-        branch: v3.20
         packages: >
           build-base
           gcc
@@ -191,7 +186,6 @@ jobs:
     - uses: jirutka/setup-alpine@v1
       with:
         arch: ppc64le
-        branch: v3.15
         packages: >
           build-base
           gcc
@@ -211,7 +205,6 @@ jobs:
 #    - uses: jirutka/setup-alpine@v1
 #      with:
 #        arch: ppc64be
-#        branch: v3.15
 #        packages: >
 #          build-base
 #          gcc
@@ -241,3 +234,43 @@ jobs:
       run: make newmhs
     - name: run emscripten tests
       run: make runtestemscripten
+
+
+
+  # Build packages on a 64 bit big endian platform
+  build-hackage-x86:
+    runs-on: ubuntu-latest
+    steps:
+    # mhs
+    - uses: jirutka/setup-alpine@v1
+      with:
+        arch: s390x
+        packages: >
+          build-base
+          gcc
+          make
+          curl
+          git
+
+    - name: checkout mhs repo
+      uses: actions/checkout@v4
+      with:
+        path: mhs
+    - name: make and install mhs
+      run: |
+        cd mhs
+        make minstall
+        echo "$HOME/.mcabal/bin" >> "$GITHUB_PATH"
+      shell: alpine.sh {0}
+
+    # Build hackage packages
+    - name: compile and install packages
+      run: |
+        cd mhs
+        make -f Makefile.packages
+      shell: alpine.sh {0}
+
+    # DONE
+    - name: cleanup
+      run: |
+        rm -rf $HOME/.mcabal

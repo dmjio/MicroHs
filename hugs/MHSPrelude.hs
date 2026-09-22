@@ -4,10 +4,11 @@ module MHSPrelude(
   module Prelude,
   module MHSPrelude,
 --  module Control.Monad.Fail,
-  module Control.Arrow,
+  -- Exporting these with 'module Control.Arrow' does not work
+  first, second,
   module Data.Monoid,
   module Data.Semigroup,
-  (<$>), Applicative(..), (*>),
+  (<$>), Applicative(..), (*>), (<*), (>=>), (<=<)
   ) where
 import Hugs.Prelude()
 import Prelude hiding(fail)
@@ -16,6 +17,7 @@ import Control.Arrow(first, second)
 import Control.Applicative
 import Control.Exception(Exception, try)
 --import Control.Monad.Fail
+import Data.Int
 import Data.List
 import Data.Maybe
 import Data.Monoid
@@ -54,6 +56,12 @@ spanEnd p xs = (dropWhileEnd p xs, takeWhileEnd p xs)
 
 breakEnd :: (a -> Bool) -> [a] -> ([a], [a])
 breakEnd p = spanEnd (not . p)
+
+subsequences :: [a] -> [[a]]
+subsequences xs = [] : sub xs
+  where sub []     = []
+        sub (x:xs) = [x] : foldr f [] (sub xs)
+          where f ys r = ys : (x : ys) : r
 
 ------- Version --------
 
@@ -116,6 +124,13 @@ openFileM path m = do
     Left _ -> return Nothing
     Right h -> return (Just h)
 
+openBinaryFileM :: FilePath -> IOMode -> IO (Maybe Handle)
+openBinaryFileM path m = do
+  r <- (try $ openBinaryFile path m) :: IO (Either IOError Handle)
+  case r of
+    Left _ -> return Nothing
+    Right h -> return (Just h)
+
 splitTmp :: String -> (String, String)
 splitTmp tmpl =
   case span (/= '.') (reverse tmpl) of
@@ -170,6 +185,9 @@ appendDot x y = x `append` pack "." `append` y
 wantGMP :: Bool
 wantGMP = False
 
+wantImath :: Bool
+wantImath = False
+
 compiledWithMhs :: Bool
 compiledWithMhs = False
 
@@ -193,6 +211,7 @@ force :: (NFData a) => a -> a
 force x = x `deepseq` x
 
 instance NFData Int
+instance NFData Int64
 instance NFData Word
 instance NFData Float
 instance NFData Double
@@ -229,3 +248,11 @@ instance NFData MD5CheckSum
 
 class HasCallStack
 instance HasCallStack
+
+(<=<) :: forall m a b c . Monad m => (b -> m c) -> (a -> m b) -> (a -> m c)
+f <=< g = \ a -> do
+  b <- g a
+  f b
+
+(>=>) :: forall m a b c . Monad m => (a -> m b) -> (b -> m c) -> (a -> m c)
+(>=>) = flip (<=<)

@@ -102,6 +102,10 @@ primFloatFromInt64 :: Int64 -> Float
 primFloatFromInt64 = _primitive "Itof"
 primFloatFromInt :: Int -> Float
 primFloatFromInt = _primitive "itof"
+primFloatFromWord :: Word -> Float
+primFloatFromWord = _primitive "utof"
+primFloatToInt :: Float -> Int
+primFloatToInt = _primitive "ftoi"
 
 primDoubleAdd :: Double -> Double -> Double
 primDoubleAdd  = _primitive "d+"
@@ -130,6 +134,15 @@ primDoubleFromInt64 :: Int64 -> Double
 primDoubleFromInt64 = _primitive "Itod"
 primDoubleFromInt :: Int -> Double
 primDoubleFromInt = _primitive "itod"
+primDoubleFromWord :: Word -> Double
+primDoubleFromWord = _primitive "utod"
+primDoubleToInt :: Double -> Int
+primDoubleToInt = _primitive "dtoi"
+
+primFloatToDouble :: Float -> Double
+primFloatToDouble = _primitive "ftod"
+primDoubleToFloat :: Double -> Float
+primDoubleToFloat = _primitive "dtof"
 
 primWordAdd :: Word -> Word -> Word
 primWordAdd  = _primitive "u+"
@@ -348,6 +361,13 @@ primNewForeignPtr = _primitive "fpnew"
 primAddFinalizer :: FunPtr (Ptr a -> IO ()) -> ForeignPtr a -> IO ()
 primAddFinalizer = _primitive "fpfin"
 
+-- Run the IO action somewhat atomically.
+-- This means that it is guaranteed an uninterrupted slice.
+-- This is used for atomicModifyIORef which has a very bounded amount of work,
+-- so a slice is good enough.
+primAtomic :: IO a -> IO a
+primAtomic = _primitive "IO.atomic"
+
 primForkIO :: IO () -> IO ThreadId
 primForkIO = _primitive "IO.fork"
 
@@ -376,6 +396,12 @@ primTryPutMVar :: MVar a -> a -> IO Bool
 primTryPutMVar = _primitive "IO.tryputmvar"
 primTryReadMVar :: MVar a -> IO b {-(Maybe a)-}
 primTryReadMVar = _primitive "IO.tryreadmvar"
+
+primWaitWriteFD :: Int -> IO Int
+primWaitWriteFD = _primitive "IO.waitwrfd"
+
+primWaitReadFD :: Int -> IO Int
+primWaitReadFD = _primitive "IO.waitrdfd"
 
 primThreadDelay :: Int -> IO ()
 primThreadDelay = _primitive "IO.threaddelay"

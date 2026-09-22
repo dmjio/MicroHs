@@ -25,6 +25,7 @@ import MicroHs.List
 import MicroHs.Names
 import MicroHs.State as S
 import MicroHs.TypeCheck
+import Text.PrettyPrint.HughesPJLiteClass(prettyShow)
 
 type LDef = (Ident, Exp)
 
@@ -256,8 +257,8 @@ dsExpr aexpr =
               body = encTuple $ map Var xs
             in foldr Lam body xs
           Nothing -> Var (conIdent c)
-    _ -> impossibleShow aexpr
-  where addLoc i = EApp (EVar i) (ELit l (LStr (show l ++ ": "))) where l = getSLoc i
+    _ -> impossiblePP aexpr
+  where addLoc i = EApp (EVar i) (ELit l (LStr (prettyShow l ++ ": "))) where l = getSLoc i
         iapp = mkIdent "Data.List_Type.++"
 
 dsCompr :: Expr -> [EStmt] -> Expr -> Expr
@@ -309,7 +310,7 @@ showLDefs = unlines . map showLDef
 showLDef :: LDef -> String
 showLDef a =
   case a of
-    (i, e) -> showIdent i ++ " = " ++ show e
+    (i, e) -> showIdent i ++ " = " ++ prettyShow e
 
 ----------------
 
@@ -474,7 +475,7 @@ mkCase var pes dflt =
 eMatchErr :: SLoc -> Exp
 eMatchErr loc =
   let exn = mkIdentSLoc loc "Control.Exception.Internal.patternMatchFail"
-      msg = LStr $ show loc
+      msg = LStr $ prettyShow loc
   in  App (Var exn) (Lit msg)
 
 -- If the first expression isn't a variable/literal, then use
@@ -527,7 +528,7 @@ pConOf apat =
     ECon c -> c
     EAt _ p -> pConOf p
     EApp p _ -> pConOf p
-    _ -> impossibleShow apat
+    _ -> impossiblePP apat
 
 pArgs :: EPat -> [EPat]
 pArgs apat =
@@ -615,10 +616,10 @@ parseImpEnt loc _cc _ ui s =
   case words s of
     ["dynamic"] -> ImpDynamic
     ["wrapper"] -> ImpWrapper
-    "static" : r -> rest r
-    r            -> rest r
- where rest r = let (incs, r') = span (".h" `isSuffixOf`) r   -- there can be several header files
-                in  rest' (ImpStatic incs) r'
+    "static" : r -> rest [] r
+    r            -> rest [] r
+ where rest incs (inc : r) | ".h" `isSuffixOf` inc = rest  (incs ++ [inc])  r
+       rest incs r                                 = rest' (ImpStatic incs) r
        rest' c ("&"     : r) = rest'' (c IPtr) r
        rest' c ['&'     : r] = rest'' (c IPtr) [r]
        rest' c ("value" : r) = rest'' (c IValue) [unwords r]
@@ -646,4 +647,4 @@ mkForImp mn no cc sf ms i ty =
           ImpStatic _ _ n ->
             if isValidC n then n else fno
           _ -> fno
-  in  LForImp impent cid cty
+  in  LForImp mn impent cid cty

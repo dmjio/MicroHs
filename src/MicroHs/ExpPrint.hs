@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
-module MicroHs.ExpPrint(toStringCMdl, toStringP, encodeString, combVersion, removeUnused, renumberCMdl) where
+module MicroHs.ExpPrint(toStringCMdl, toStringP, encodeString, combVersion, removeUnused, renumberCMdl, renumberCMdlM) where
 import qualified Prelude(); import MHSPrelude
+import qualified Data.ByteString.Char8 as BS
 import Data.Char(ord, chr)
 import qualified MicroHs.IdentMap as M
 import Data.Maybe
@@ -19,7 +20,7 @@ type ForExpTable = [(Ident, Ident, CType)]
 -- Version number of combinator file.
 -- Must match version in eval.c.
 combVersion :: String
-combVersion = "v8.3\n"
+combVersion = "v8.4\n"
 
 -- Remove unused definitions.  Only used for dumping definitions.
 removeUnused :: CMdl -> [LDef]
@@ -34,15 +35,19 @@ removeUnused (ds, emain) = dfs roots M.empty
                     | otherwise = dfs (freeVars e ++ is) (M.insert i e done)
                                   where e = fromMaybe (error $ "removeUnused: undef " ++ show i) $ M.lookup i dMap
 
+renumberCMdl :: CMdl -> (ForExpTable, CMdl)
+renumberCMdl (ds, emain) =
+  let fexps = [ (i, t) | (i, e) <- ds, Just (_, t) <- [getForExp e] ]
+      dMap = M.fromList ds
+  in  renumberCMdlM fexps dMap emain
+
 -- Rename (to a numbers) top level definitions and remove unused ones.
 -- This is the "linking" of the program.
 -- Returns the renamed foreign exports and the "linked" CNdl
-renumberCMdl :: CMdl -> (ForExpTable, CMdl)
-renumberCMdl (ds, emain) =
+renumberCMdlM :: [(Ident, CType)] -> M.Map Exp -> Exp -> (ForExpTable, CMdl)
+renumberCMdlM fexps dMap emain =
   let
-    fexps = [ (i, t) | (i, e) <- ds, Just (_, t) <- [getForExp e] ]
     roots = freeVars emain ++ map fst fexps
-    dMap = M.fromList ds
     -- Shake the tree bottom-up, renaming identifiers as we go along.
     -- This is much faster than (say) computing the sccs and walking that.
     dfs :: Ident -> State (Int, M.Map Exp, [LDef]) ()
@@ -113,10 +118,11 @@ toStringP ae =
     Lit (LStr s) ->
       -- Encode very short string directly as combinators.
       if length s > 1 then
-        toStringP (App (Lit (LPrim "fromUTF8")) (Lit (LBStr (utf8encode s))))
+        toStringP (App (Lit (LPrim "fromUTF8")) (Lit (LBStr (BS.pack (utf8encode s)))))
       else
         toStringP (encodeString s)
-    Lit (LBStr s) -> (quoteString s ++) . (' ' :)
+    Lit (LBStr s) | BS.length s > 100 -> byteString s -- arbitrary limit
+                  | otherwise -> (quoteString (BS.unpack s) ++) . (' ' :)
     Lit (LInteger _) -> undefined
     Lit (LRat _) -> undefined
     Lit (LTick s) -> ('!':) . (quoteString s ++) . (' ' :)
@@ -153,6 +159,11 @@ quoteString s =
       | c < '\xff'             = ['|', chr (ord c - 0x80)]
       | otherwise              = "\\_"
   in  '"' : concatMap (\c -> achar (chr (ord c `rem` 256))) s ++ ['"']
+
+-- BaseStrings are encoded without quotations,
+-- using a length and raw data instead.
+byteString :: BS.ByteString -> String -> String
+byteString bs s = "$" ++ show (BS.length bs) ++ " " ++ BS.unpack bs ++ s
 
 encodeString :: String -> Exp
 encodeString = encList . map (Lit . LInt . ord)

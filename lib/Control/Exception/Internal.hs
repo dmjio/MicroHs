@@ -10,6 +10,7 @@ module Control.Exception.Internal(
   patternMatchFail, noMethodError, recSelError, recConError,
   AsyncException(..),
   ArithException(..),
+  SerializeException(..),
   SomeAsyncException(..),
   asyncExceptionToException,
   asyncExceptionFromException,
@@ -75,7 +76,9 @@ rtsExn e =
       else if primIntEQ n (5::Int) then SomeException BlockedIndefinitelyOnMVar
       else if primIntEQ n (6::Int) then SomeException BlockedIndefinitelyOnSTM
       else if primIntEQ n (7::Int) then SomeException Overflow
-      else if primIntEQ n (8::Int) then let v = primPerformIO (primJSTakeExn n) in primSeq v (SomeException (JSException v))
+      else if primIntEQ n (8::Int) then SomeException Serialize
+      else if primIntEQ n (9::Int) then SomeException Deserialize
+      else if primIntEQ n (10::Int) then let v = primPerformIO (primJSTakeExn n) in primSeq v (SomeException (JSException v))
       else e
 
 -- A JavaScript exception, only with the emscripten target.
@@ -197,6 +200,15 @@ instance Show ArithException where
   show RatioZeroDenominator = "Ratio has zero denominator"
 
 instance Exception ArithException
+
+-------------------
+
+data SerializeException
+  = Serialize
+  | Deserialize
+  deriving ({-Eq, Ord,-} Show, Typeable)  -- Eq, Ord in Exception module
+
+instance Exception SerializeException
 
 -------------------
 

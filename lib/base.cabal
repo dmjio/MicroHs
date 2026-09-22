@@ -1,6 +1,6 @@
 cabal-version:  3.0
 name:           base
-version:        0.15.3.0
+version:        0.16.6.0
 license:        Apache-2.0
 license-file:   LICENSE
 maintainer:     lennart@augustsson.net
@@ -52,6 +52,7 @@ library base
         Control.Monad.STM
         Control.Monad.Zip
         Control.WrappedMonad
+        Data.Any
         Data.Array.Byte
         Data.Bifoldable
         Data.Bifoldable1
@@ -129,6 +130,9 @@ library base
         Data.STRef.Strict
         Data.Semigroup
         Data.String
+        Data.String.Interpolate
+        Data.String.Interpolate.Basic
+        Data.String.Interpolate.ShowS
         Data.Text
         Data.Text.Encoding
         Data.Text.IO
@@ -191,10 +195,12 @@ library base
         System.Environment
         System.Exit
         System.IO
+        System.IO.FD
         System.IO.Error
         System.IO.MD5
         System.IO.PrintOrRun
         System.IO.Serialize
+        System.IO.Serialize.TypeDescr
         System.IO.StringHandle
         System.IO.TimeMilli
         System.IO.Transducers

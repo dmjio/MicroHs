@@ -17,6 +17,9 @@ module Data.Text(
   splitOn,
   dropWhileEnd,
   words,
+  unwords,
+  toLower,
+  toUpper,
   foldr,
   concat,
   lines,
@@ -32,20 +35,17 @@ module Data.Text(
   isInfixOf,
   replace,
   map,
-  concatMap,
-  foldl,
-  foldl',
-  unwords,
-  toLower,
-  toUpper,
+  dropAround,
   strip,
   stripStart,
   stripEnd,
-  dropAround,
   stripPrefix,
   stripSuffix,
-  any,
   all,
+  any,
+  concatMap,
+  foldl,
+  foldl',
   filter,
   reverse,
   last,
@@ -93,15 +93,16 @@ module Data.Text(
   scanl1,
   scanr1,
   ) where
-import qualified Prelude(); import MiniPrelude hiding(head, tail, null, length, words, map,
-  concatMap, foldl, unwords, any, all, filter, reverse, last, init, elem, zip, span, break,
+import qualified Prelude(); import MiniPrelude hiding(head, tail, null, length, words, unwords, map,
+  concatMap, foldl, any, all, filter, reverse, last, init, elem, zip, span, break,
   maximum, minimum, scanl, scanr, splitAt, zipWith, foldl1, foldr1, scanl1, scanr1)
-import qualified Data.Char as C
 import Control.DeepSeq.Class
+import qualified Data.Char as C
 import qualified Data.List as L
 import Data.String
 import qualified Data.ByteString.Internal as BS
 import Data.Text.Internal
+import Text.Read.Internal
 
 type StrictText = Text
 
@@ -120,6 +121,9 @@ show = pack . MiniPrelude.show
 
 cmp :: (BS.ByteString -> BS.ByteString -> Bool) -> (Text -> Text -> Bool)
 cmp op (T x) (T y) = op x y
+
+instance Read Text where
+  readsPrec p str = [(pack x, y) | (x, y) <- readsPrec p str]
 
 instance Show Text where
   showsPrec p = showsPrec p . unpack
@@ -143,10 +147,10 @@ singleton :: Char -> Text
 singleton c = pack [c]
 
 pack :: String -> Text
-pack s = T (_primitive "toUTF8" s)
+pack = T . BS.packUTF8
 
 unpack :: Text -> String
-unpack (T t) = _primitive "fromUTF8" t
+unpack (T t) = BS.primBSfromUTF8 t
 
 append :: Text -> Text -> Text
 append (T x) (T y) = T (BS.append x y)
@@ -160,7 +164,7 @@ length = L.length . unpack
 head :: Text -> Char
 head (T t)
   | BS.null t = error "Data.Text.head: empty"
-  | otherwise = _primitive "headUTF8" t
+  | otherwise = BS.primBSheadUTF8 t
 
 cons :: Char -> Text -> Text
 cons c t = singleton c `append` t
@@ -171,7 +175,7 @@ snoc t c = t `append` singleton c
 tail :: Text -> Text
 tail (T t)
   | BS.null t = error "Data.Text.tail: empty"
-  | otherwise = _primitive "tailUTF8" t
+  | otherwise = T (BS.primBStailUTF8 t)
 
 uncons :: Text -> Maybe (Char, Text)
 uncons t | null t    = Nothing
@@ -196,6 +200,15 @@ splitOnList sep = loop []
 
 words :: Text -> [Text]
 words = L.map pack . L.words . unpack
+
+unwords :: [Text] -> Text
+unwords = pack . L.unwords . L.map unpack
+
+toLower :: Text -> Text
+toLower = pack . L.map C.toLower . unpack
+
+toUpper :: Text -> Text
+toUpper = pack . L.map C.toUpper . unpack
 
 foldr :: (Char -> a -> a) -> a -> Text -> a
 foldr f z = L.foldr f z . unpack
@@ -242,23 +255,8 @@ takeWhile p = pack . L.takeWhile p . unpack
 map :: (Char -> Char) -> Text -> Text
 map f = pack . L.map f . unpack
 
-concatMap :: (Char -> Text) -> Text -> Text
-concatMap f = concat . L.map f . unpack
-
-foldl :: (a -> Char -> a) -> a -> Text -> a
-foldl f z = L.foldl f z . unpack
-
-foldl' :: (a -> Char -> a) -> a -> Text -> a
-foldl' f z = L.foldl' f z . unpack
-
-unwords :: [Text] -> Text
-unwords = intercalate (pack " ")
-
-toLower :: Text -> Text
-toLower = map C.toLower
-
-toUpper :: Text -> Text
-toUpper = map C.toUpper
+dropAround :: (Char -> Bool) -> Text -> Text
+dropAround p = dropWhile p . dropWhileEnd p
 
 stripStart :: Text -> Text
 stripStart = dropWhile C.isSpace
@@ -267,22 +265,28 @@ stripEnd :: Text -> Text
 stripEnd = dropWhileEnd C.isSpace
 
 strip :: Text -> Text
-strip = stripEnd . stripStart
-
-dropAround :: (Char -> Bool) -> Text -> Text
-dropAround p = dropWhileEnd p . dropWhile p
+strip = dropAround C.isSpace
 
 stripPrefix :: Text -> Text -> Maybe Text
-stripPrefix p t = fmap pack (L.stripPrefix (unpack p) (unpack t))
+stripPrefix p t = pack <$> L.stripPrefix (unpack p) (unpack t)
 
 stripSuffix :: Text -> Text -> Maybe Text
-stripSuffix p t = fmap (pack . L.reverse) (L.stripPrefix (L.reverse (unpack p)) (L.reverse (unpack t)))
+stripSuffix p t = pack <$> L.stripSuffix (unpack p) (unpack t)
+
+all :: (Char -> Bool) -> Text -> Bool
+all p = L.all p . unpack
 
 any :: (Char -> Bool) -> Text -> Bool
 any p = L.any p . unpack
 
-all :: (Char -> Bool) -> Text -> Bool
-all p = L.all p . unpack
+concatMap :: (Char -> Text) -> Text -> Text
+concatMap f = concat . L.map f . unpack
+
+foldl :: (a -> Char -> a) -> a -> Text -> a
+foldl f z = L.foldl f z . unpack
+
+foldl' :: (a -> Char -> a) -> a -> Text -> a
+foldl' f z = L.foldl' f z . unpack
 
 filter :: (Char -> Bool) -> Text -> Text
 filter p = pack . L.filter p . unpack
