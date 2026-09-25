@@ -107,6 +107,8 @@ uintptr_t          mhs_to_HsStablePtr(intptr_t, int);
 #if defined(__EMSCRIPTEN__)
 int                mhs_to_JSVal(intptr_t, int);
 void               mhs_js_check_error(void);
+void               mhs_js_async_begin(void);
+void               mhs_js_async_end(void);
 #endif
 
 void       ffe_push(NODEPTR);

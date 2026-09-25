@@ -1,0 +1,20 @@
+main: waiting
+callback: caught divide by zero
+callback: masking state Unmasked
+callback: own thread True
+forked thread ran
+main: got callback 1
+callback: throwing
+JavaScript caught: error: boom
+main: got callback 3
+promise rejected: error: async boom
+promise resolved
+main: got callback 4
+thread got: thread killed
+main: got callback 5
+callback: during await
+callback: caught JSException for nested await
+main: await done 42
+use after free: caught
+handle table bounded
+main: done

@@ -212,14 +212,11 @@ mkHdr (ImpJS sf s, f, ty, _) =
           KBool  -> "!!" ++ argName i
           _      -> argName i
       jsargs = intercalate ", " (zipWith jsArgConv as ixs)
-      callJS = case sf of
-                 Unsafe        -> "call"
-                 Safe          -> "callSafe"
-                 Interruptible -> "callAsync"
+      callJS = if sf == Interruptible then "callAsync" else "call"
       body = (if sf == Interruptible then "await " else "") ++
              "Module.mhsjs." ++ callJS ++ "(" ++ srcName ++ ", " ++ show n ++ ", [" ++ jsargs ++ "])"
       -- JavaScript code for the result, and the C type of the result
-      (jsres, ctype, asmm) =
+      (jsres0, ctype, asmm) =
         case rk of
           KUnit   -> (body, "void", "")
           KJSVal  -> ("return Module.mhsjs.newJSVal(" ++ body ++ ")", "int", "_INT")
@@ -229,6 +226,10 @@ mkHdr (ImpJS sf s, f, ty, _) =
           KDouble -> ("return " ++ body, "double", "_DOUBLE")
           KFloat  -> ("return " ++ body, "double", "_DOUBLE")
           KPtr    -> ("return " ++ body, "void *", "_PTR")
+      -- With safe/interruptible any JavaScript exception (also in the argument
+      -- conversion, e.g. a freed JSVal) is saved and raised as a JSException by mhs_js_check_error.
+      jsres = if sf == Unsafe then jsres0 else
+              "try { " ++ jsres0 ++ " } catch (e) { Module.mhsjs.error = e; Module.mhsjs.hasError = true; return 0; }"
       cargs = intercalate ", " (zipWith mkJSArg as ixs ++ [cString s])
       ret r = case rk of
                 KUnit -> "return mhs_from_Unit(s, " ++ show n ++ ")"
@@ -248,8 +249,13 @@ mkHdr (ImpJS sf s, f, ty, _) =
         case rk of
           KUnit -> call ++ "; " ++ check ++ ret ""
           _     -> ctype ++ " r = " ++ call ++ "; " ++ check ++ ret "r"
+      -- An interruptible import cannot be nested inside another asynchronous operation.
+      fbodyAsync call =
+        case rk of
+          KUnit -> "mhs_js_async_begin(); " ++ call ++ "; mhs_js_async_end(); " ++ check ++ ret ""
+          _     -> "mhs_js_async_begin(); " ++ ctype ++ " r = " ++ call ++ "; mhs_js_async_end(); " ++ check ++ ret "r"
   in  if sf == Interruptible then
-        asyncDecl ++ mkMhsFun f (fbody asyncCall)
+        asyncDecl ++ mkMhsFun f (fbodyAsync asyncCall)
       else
         mkMhsFun f (fbody asmCall)
 mkHdr _ = undefined

@@ -134,18 +134,25 @@ string conversions, and functions to create JavaScript callbacks that call Haske
 e.g., `syncCallback1 :: (JSVal -> IO ()) -> IO JSVal`.
 Callbacks can also be made with `foreign import javascript "wrapper sync"` (or `"wrapper"` for a callback that
 runs the Haskell code later and returns a `Promise`), like in GHC's WebAssembly backend.
-The safety annotation matters: with `unsafe` (the default) a JavaScript exception in the code is fatal,
+The safety annotation matters: with `unsafe` a JavaScript exception in the code is fatal,
 with `safe` it is raised as a `JSException`, and with `interruptible` the code is an `async` function
 (so it can use `await`) and the Haskell program waits for the result; this uses emscripten's ASYNCIFY,
 which is added to the C compiler flags automatically.
+Note that, unlike the Haskell report, a `foreign import javascript` without a safety annotation is `unsafe`
+(a JavaScript exception in it is a programming error).
 When a program has created callbacks the JavaScript runtime stays alive after `main` returns, so the callbacks
 can be invoked by JavaScript events.
 The other Haskell threads keep running too: after `main` (or a callback) has finished, the runnable threads
 run until they are all blocked, and a thread in `threadDelay` is resumed by a JavaScript timer.
-When `main` itself is blocked (e.g., in `takeMVar` waiting for a callback) the runtime yields to the
-JavaScript event loop with ASYNCIFY so the callbacks can run.
-A callback runs to completion when it is called, so it must not block or call an `interruptible` import.
-See `tests/JSVal.hs` for examples.
+When `main` itself is blocked (e.g., in `takeMVar` waiting for a callback) the runtime waits for the
+JavaScript event loop (this needs ASYNCIFY) so the callbacks can run.
+A callback runs as a Haskell thread of its own (so it can use `catch`, `forkIO`, `putMVar`, etc.),
+but it runs to completion when it is called, without preemption: it must not block (e.g., `takeMVar` on an
+empty `MVar` is fatal), and it cannot call an `interruptible` import (that raises a `JSException`).
+An uncaught Haskell exception in a callback is thrown to the JavaScript caller as an `Error`.
+See `tests/JSVal.hs` and `tests/JSCallback.hs` for examples.
+The runtime can also be compiled to JavaScript on its own (`make rts.js`) to run combinator files with node:
+`node rts.js prog.comb`.
 The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)
 generate JavaScript only (`-sWASM=0`) instead of WebAssembly; the JavaScript FFI works the same way.
 The targets `browser` and `browser_js` are for the browser (no node file system access);
