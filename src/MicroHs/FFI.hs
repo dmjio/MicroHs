@@ -27,7 +27,12 @@ makeFFI _ forExps exclude dss =
       -- JavaScript imports are only compiled for emscripten, so other targets can still compile the code.
       jsGuard imp str = if isJS imp then "#if defined(__EMSCRIPTEN__)\n" ++ str ++ "\n#endif" else str
       jsincs   = if any isJS ffiImports then ["#if defined(__EMSCRIPTEN__)", "#include \"emscripten.h\"", "#endif"] else []
-      asyncFFI = or [ sf == Interruptible | (ImpJS sf _, _, _, _) <- ffiImports ]
+      -- ASYNCIFY is needed for an 'interruptible' import (it awaits a Promise),
+      -- and also when the program creates JavaScript callbacks: a Haskell thread
+      -- that blocks (e.g. takeMVar) waiting for a callback can only let the
+      -- JavaScript event loop run by unwinding the stack.
+      asyncFFI = or [ sf == Interruptible || isWrapper s | (ImpJS sf s, _, _, _) <- ffiImports ]
+      isWrapper s = s == "wrapper" || s == "wrapper sync"
       mkSig (_, i, CType t) = let (as, ior) = getArrows t in mkExportSig i as ior ++ ";"
       header = unlines
         ["#include <stdint.h>",
