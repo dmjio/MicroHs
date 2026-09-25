@@ -17,4 +17,5 @@ callback: caught JSException for nested await
 main: await done 42
 use after free: caught
 handle table bounded
+value callback: returned 1, ran 1 time(s)
 main: done

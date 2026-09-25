@@ -3,6 +3,7 @@ module JSCallback(main) where
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
+import Data.IORef
 import Data.List(isInfixOf)
 import GHC.Wasm.Prim
 
@@ -21,6 +22,9 @@ foreign import javascript "$1" jsValToInt :: JSVal -> IO Int
 foreign import javascript "({ n: $1 })" mkObj :: Int -> IO JSVal
 foreign import javascript safe "$1.n" getN :: JSVal -> IO Int
 foreign import javascript "mhsjs.kv.size" tableSize :: IO Int
+-- Call a callback that returns a value, and report what it returned.
+foreign import javascript "return $1()" call0 :: JSVal -> IO JSVal
+foreign import javascript "$1" intToJSVal :: Int -> IO JSVal
 
 main :: IO ()
 main = do
@@ -91,5 +95,16 @@ main = do
   forM_ [1 .. 150000 :: Int] $ \ i -> mkObj i >>= getN >>= \ n -> when (n /= i) (putStrLn "bad n")
   s1 <- tableSize
   putStrLn $ if s1 - s0 < 150000 then "handle table bounded" else "handle table grew by " ++ show (s1 - s0)
+
+  -- 8. A callback that returns a JSVal runs its action exactly once.
+  cnt <- newIORef (0 :: Int)
+  cbr <- syncCallback' $ do
+    modifyIORef cnt (+ 1)
+    n <- readIORef cnt
+    intToJSVal n
+  v8 <- call0 cbr
+  n8 <- jsValToInt v8
+  runs <- readIORef cnt
+  putStrLn $ "value callback: returned " ++ show n8 ++ ", ran " ++ show runs ++ " time(s)"
 
   putStrLn "main: done"

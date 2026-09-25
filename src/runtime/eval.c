@@ -7975,8 +7975,8 @@ exn_cstring(NODEPTR exn)
   return strdup(msg);
 }
 
-/* Run the IO action at TOP(0) (an application of PERFORMIO, as built by ffe_exec)
- * as a thread of its own, with the scheduler in whatever state it is in:
+/* Run the IO action at TOP(0) as a thread of its own, and leave its result at TOP(0),
+ * with the scheduler in whatever state it is in:
  *  - idle (main has finished, JavaScript called us from the event loop),
  *  - waiting in pause_exec for a callback,
  *  - or in the middle of a thread that called JavaScript (a synchronous callback
@@ -8001,7 +8001,10 @@ run_callback(char **msgp)
 
   *msgp = 0;
   memcpy(&saved_sched, &sched, sizeof(jmp_buf));
-  ct = new_thread(new_ap(TOP(0), combWorld)); /* added to the tail of the runq */
+  GCCHECK(4);
+  /* The root is what performIO builds: ((action World) K), so that evaluating it
+   * performs the action and yields its result. */
+  ct = new_thread(new_ap(new_ap(TOP(0), combWorld), combK)); /* added to the tail of the runq */
   /* Move it to the head, so it runs first */
   if (runq.mq_head != ct) {
     struct mthread *p = runq.mq_head;
@@ -8020,7 +8023,7 @@ run_callback(char **msgp)
 
   switch (setjmp(sched)) {
   case mt_main:
-    (void)evali(ct->mt_root);   /* run it */
+    TOP(0) = evali(ct->mt_root); /* run it, and keep the result */
     (void)remove_q_head(&runq);
     ct->mt_state = ts_finished;
     ct->mt_root = NIL;
@@ -8076,13 +8079,13 @@ mhs_js_callback(uvalue_t sp, int ret, int nargs, int *args)
     mhs_from_JSVal(ffe_alloc(), 0, args[i]);
     ffe_apply();
   }
-  /* As ffe_exec(), but run as a thread */
-  NODEPTR n = POPTOP();
-  PUSH(new_ap(combPERFORMIO, n));
+  /* As ffe_exec(), but run as a thread; run_callback leaves the result at TOP(0) */
   NODEPTR exn = run_callback(&msg);
-  TOP(0) = new_ap(combI, TOP(0)); /* mhs_to_xxx wants the result at ARG(TOP(0)) */
-  if (exn == NIL && ret)
+  if (exn == NIL && ret) {
+    GCCHECK(1);
+    TOP(0) = new_ap(combI, TOP(0)); /* mhs_to_xxx wants the result at ARG(TOP(0)) */
     r = mhs_to_JSVal(stack_ptr, -1);
+  }
   ffe_pop();
   if (exn != NIL) {
     mhs_js_set_callback_error(msg);
