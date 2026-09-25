@@ -158,6 +158,11 @@ generate JavaScript only (`-sWASM=0`) instead of WebAssembly; the JavaScript FFI
 The targets `browser` and `browser_js` are for the browser (no node file system access);
 they use a 4M cell heap (about 60MB) instead of the default 50M, so that garbage collection (which also
 releases the JavaScript values referenced from Haskell) happens regularly; change it with `-optc -DHEAP_CELLS=N`.
+The `browser` target compiles with `-Oz -sSUPPORT_LONGJMP=wasm`: the evaluator uses `setjmp`, and with emscripten's
+default JavaScript implementation of `longjmp` every call out of a function that uses `setjmp` goes through a
+JavaScript trampoline, which makes `-Oz` (which does not inline) several times slower than `-O3`; with WebAssembly
+exception handling (browsers since 2022) `-Oz` is as fast as `-O3` and about 12% smaller compressed.
+`browser_js` cannot use it (there is no WebAssembly) and stays at `-O3`.
 
 JavaScript files can be embedded in the generated output with `-js FILE` (e.g., a JavaScript runtime
 library used via the FFI).  A target supports this if it has a `js` key in `mhs.conf` giving the
