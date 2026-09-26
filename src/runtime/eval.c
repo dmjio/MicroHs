@@ -1141,6 +1141,9 @@ struct mthread {
   counter_t       mt_num_slices; /* number of slices so far */
   NODEPTR         mt_root;       /* root of the graph to reduce */
   struct mvar    *mt_exn;        /* possible thrown exception */
+  struct mthread *mt_throwto;    /* When set, we are in throwTo to this thread and have
+                                  * already handed over the exception; we are waiting for
+                                  * the target to take it.  See throwto(). */
   NODEPTR         mt_mval;       /* Filled when put_mvar wakes a thread waiting in read_mvar.
                                   * The value cannot be taken from the mvar by the read, because
                                   * we need to guarantee that all reads get the same value. */
@@ -1506,6 +1509,25 @@ check_pollq(int timeout)
 #endif  /* WANT_IO_POLL */
 }
 
+/* Non-zero while a JavaScript callback runs Haskell (see run_callback).  Nothing
+ * may block there: the calling thread's C stack has been discarded, so there is
+ * nothing to return to.  throwTo therefore does not wait for delivery. */
+int in_js_callback = 0;
+
+/* Wake every thread that is blocked in throwTo waiting for mt to take its
+ * exception.  Called when mt takes one, and when mt finishes or dies. */
+void
+wake_throwto(struct mthread *mt)
+{
+  for (struct mthread *k; (k = remove_q_head(&mt->mt_exn->mv_read)); ) {
+#if THREAD_DEBUG
+    if (thread_trace)
+      printf("wake_throwto: wake %d, which threw to %d\n", (int)k->mt_id, (int)mt->mt_id);
+#endif  /* THREAD_DEBUG */
+    add_runq_tail(k);
+  }
+}
+
 void
 throwto(struct mthread *mt, NODEPTR exn)
 {
@@ -1514,15 +1536,46 @@ throwto(struct mthread *mt, NODEPTR exn)
     printf("throwto: id=%d\n", (int)mt->mt_id);
   }
 #endif  /* THREAD_DEBUG */
-  thread_intr(mt);
-  if (mt->mt_state != ts_died && mt->mt_state != ts_finished) {
-#if THREAD_DEBUG
-    if (thread_trace) {
-      printf("throwto: id=%d put_mvar exn\n", (int)mt->mt_id);
-    }
-#endif  /* THREAD_DEBUG */
+  struct mthread *me = runq.mq_head;
+
+  if (mt == me) {
+    /* Throwing to ourselves: just hand the exception over.  It is raised at the
+     * next interruption point, so there is nothing to wait for. */
     (void)put_mvar(false, mt->mt_exn, exn); /* never returns if it blocks */
+    return;
   }
+  if (me->mt_throwto == mt) {
+    /* We handed the exception over in an earlier execution of this throwTo and
+     * blocked; being back here means the target has taken it, or has died. */
+#if THREAD_DEBUG
+    if (thread_trace)
+      printf("throwto: id=%d delivered\n", (int)mt->mt_id);
+#endif  /* THREAD_DEBUG */
+    me->mt_throwto = 0;
+    return;
+  }
+  thread_intr(mt);
+  if (mt->mt_state == ts_died || mt->mt_state == ts_finished)
+    return;                     /* there is nothing left to interrupt */
+#if THREAD_DEBUG
+  if (thread_trace) {
+    printf("throwto: id=%d put_mvar exn\n", (int)mt->mt_id);
+  }
+#endif  /* THREAD_DEBUG */
+  (void)put_mvar(false, mt->mt_exn, exn); /* never returns if it blocks */
+  if (in_js_callback)
+    return;                     /* a callback must not block; deliver it later */
+  /* GHC's throwTo does not return until the exception has been raised in the
+   * target thread, so wait for the target to take it.  Without this the target
+   * stays runnable with an exception pending, and can still run a stretch of
+   * code -- and consume shared state -- before it is interrupted.
+   * We wait on the read queue of the target's exception MVar: check_thrown and
+   * a finishing thread wake it, and thread_intr searches it, so the wait is
+   * itself interruptible. */
+  me = remove_q_head(&runq);
+  me->mt_throwto = mt;
+  add_q_tail(&mt->mt_exn->mv_read, me);
+  resched(me, ts_wait_mvar);     /* never returns */
 }
 
 void
@@ -1537,6 +1590,8 @@ check_thrown(bool intr)
   if (exn == NIL)
     return;            /* no thrown exception */
   /* the current thread has an async exception */
+  wake_throwto(runq.mq_head);    /* the throwTo that sent it may now return */
+  runq.mq_head->mt_throwto = 0;  /* we are unwinding; drop any throwTo of our own */
 #if THREAD_DEBUG
   if (thread_trace)
     printf("check_thrown: exn for %d\n", (int)runq.mq_head->mt_id);
@@ -1632,6 +1687,7 @@ new_thread(NODEPTR root)
   mt->mt_mask = mask_unmasked;
   mt->mt_root = root;
   mt->mt_exn = new_mvar();
+  mt->mt_throwto = 0;
   mt->mt_mval = NIL;
   mt->mt_slice = 0;
   mt->mt_mark = false;
@@ -2300,6 +2356,7 @@ run_threads(void)
 #endif  /* THREAD_DEBUG */
       mt->mt_state = ts_died;
       mt->mt_root = NIL;
+      wake_throwto(mt);         /* release anyone blocked in throwTo to it */
     }
   }
 #if THREAD_DEBUG
@@ -2347,6 +2404,7 @@ run_threads(void)
 #endif  /* THREAD_DEBUG */
     mt->mt_state = ts_finished;
     mt->mt_root = NIL;
+    wake_throwto(mt);           /* release anyone blocked in throwTo to it */
     /* XXX mt_mval, mt_thrown */
 
     if (mt->mt_id == MAIN_THREAD) {
@@ -3037,6 +3095,8 @@ mark_thread(struct mthread *mt)
   if (mt->mt_root != NIL)
     mark(&mt->mt_root);
   mark_mvar(mt->mt_exn);
+  if (mt->mt_throwto)
+    mark_thread(mt->mt_throwto);
   if (mt->mt_mval != NIL)
     mark(&mt->mt_mval);
 }
@@ -8020,6 +8080,7 @@ run_callback(char **msgp)
   cur_handler = 0;              /* the callback starts without exception handlers */
   glob_slice = 1000000000;      /* no preemption: other threads must not run now */
   mhs_js_async_busy++;          /* an interruptible import from the callback cannot be awaited */
+  in_js_callback++;             /* nothing may block while the callback runs */
 
   switch (setjmp(sched)) {
   case mt_main:
@@ -8027,6 +8088,7 @@ run_callback(char **msgp)
     (void)remove_q_head(&runq);
     ct->mt_state = ts_finished;
     ct->mt_root = NIL;
+    wake_throwto(ct);
     break;
   case mt_resched:
     /* The callback blocked (e.g., takeMVar on an empty MVar) or yielded.  We cannot
@@ -8050,10 +8112,12 @@ run_callback(char **msgp)
       (void)remove_q_head(&runq);
     ct->mt_state = ts_died;
     ct->mt_root = NIL;
+    wake_throwto(ct);
     cur_handler = 0;
     break;
   }
 
+  in_js_callback--;
   mhs_js_async_busy--;
   memcpy(&sched, &saved_sched, sizeof(jmp_buf));
   glob_slice = saved_slice;
