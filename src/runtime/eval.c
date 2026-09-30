@@ -1579,7 +1579,22 @@ wake_throwto(struct mthread *mt)
     if (thread_trace)
       printf("wake_throwto: wake %d, which threw to %d\n", (int)k->mt_id, (int)mt->mt_id);
 #endif  /* THREAD_DEBUG */
-    add_runq_tail(k);
+    /* The exception has been delivered, so the thrower continues next: at
+     * the tail of the run queue it would first wait for a slice of every
+     * other runnable thread, which made a loop of killThread quadratic. */
+    k->mt_state = ts_runnable;
+    if (runq.mq_head == mt) {
+      /* mt is the running thread (check_thrown): k goes right after it */
+      k->mt_queue = mt->mt_queue;
+      mt->mt_queue = k;
+      if (runq.mq_tail == mt)
+        runq.mq_tail = k;
+    } else {
+      k->mt_queue = runq.mq_head;
+      runq.mq_head = k;
+      if (!runq.mq_tail)
+        runq.mq_tail = k;
+    }
   }
 }
 
@@ -1635,6 +1650,16 @@ throwto(struct mthread *mt, NODEPTR exn)
   me = remove_q_head(&runq);
   me->mt_throwto = mt;
   add_q_tail(&mt->mt_exn->mv_read, me);
+  /* Let the target run next.  If it is somewhere down the run queue (it was
+   * runnable, or thread_intr has just put it at the tail) it would otherwise
+   * take the exception only after every thread ahead of it has had a slice,
+   * so killing n runnable threads cost n passes over the run queue. */
+  if (mt->mt_state == ts_runnable && find_and_unlink(&runq, mt)) {
+    mt->mt_queue = runq.mq_head;
+    runq.mq_head = mt;
+    if (!runq.mq_tail)
+      runq.mq_tail = mt;
+  }
   resched(me, ts_wait_mvar);     /* never returns */
 }
 
