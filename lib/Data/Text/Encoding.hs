@@ -17,6 +17,8 @@ module Data.Text.Encoding (
     encodeUtf32BE,
 ) where
 
+-- GHC.Wasm.Marshal (see there) imports this module, so it must not import the Prelude.
+import qualified Prelude(); import MiniPrelude
 import Data.Bits.Base
 import Data.ByteString (ByteString, isValidUtf8)
 import Data.ByteString qualified as BS

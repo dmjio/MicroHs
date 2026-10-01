@@ -34,6 +34,8 @@ data Token
                                   --  E  interpolation end
                                   --  $  interpolation expr start
                                   --  %  interpolation expr end
+                                  --  J  [js| (inline JavaScript start)
+                                  --  K  |]   (inline JavaScript end)
   | TError  SLoc String           -- lexical error
   | TBrace  SLoc                  -- {n} in the Haskell report
   | TIndent SLoc                  -- <n> in the Haskell report
@@ -56,6 +58,8 @@ showToken (TSpec _ c) | c == '<' = "{ layout"
                       | c == 'L' = "(#"
                       | c == 'R' = "#)"
                       | c == 'I' = "literal"
+                      | c == 'J' = "[js|"
+                      | c == 'K' = "|]"
                       | otherwise = [c]
 showToken (TError _ s) = s
 showToken (TBrace _) = "TBrace"
@@ -65,11 +69,11 @@ showToken (TEnd _) = "EOF"
 showToken (TRaw _) = "TRaw"
 
 -- Lex an operator (a sequence of operator characters)
-lexOper :: SLoc -> String -> [Token]
-lexOper loc (d:cs) =
+lexOper :: Bool -> SLoc -> String -> [Token]
+lexOper js loc (d:cs) =
   case span isOperChar cs of
-    (ds, rs) -> TIdent loc [] (d:ds) : lex (addCol loc $ 1 + length ds) rs
-lexOper loc [] = lex loc []
+    (ds, rs) -> TIdent loc [] (d:ds) : lex js (addCol loc $ 1 + length ds) rs
+lexOper js loc [] = lex js loc []
 
 incrLine :: SLoc -> SLoc
 incrLine (SLoc f l _) = let l' = l+1 in seq l' (SLoc f l' 1)
@@ -90,42 +94,42 @@ getCol (SLoc _ _ c) = c
 ---------
 
 -- | Take a location and string and produce a list of tokens
-lex :: SLoc -> String -> [Token]
-lex loc (' ':cs)  = lex (addCol loc 1) cs
-lex loc ('\n':cs) = tIndent (lex (incrLine loc) cs)
-lex loc ('\r':cs) = lex loc cs
-lex loc ('\t':cs) = lex (tabCol loc) cs  -- TABs are a dubious feature, but easy to support
-lex loc ('{':'-':cs) = nested (addCol loc 2) cs
-lex loc ('-':'-':cs) | isComm rs = skipLine (addCol loc $ 2+length ds) cs
+lex :: Bool -> SLoc -> String -> [Token]
+lex js loc (' ':cs)  = lex js (addCol loc 1) cs
+lex js loc ('\n':cs) = tIndent (lex js (incrLine loc) cs)
+lex js loc ('\r':cs) = lex js loc cs
+lex js loc ('\t':cs) = lex js (tabCol loc) cs  -- TABs are a dubious feature, but easy to support
+lex js loc ('{':'-':cs) = nested js (addCol loc 2) cs
+lex js loc ('-':'-':cs) | isComm rs = skipLine js (addCol loc $ 2+length ds) cs
   where
     (ds, rs) = span (== '-') cs
     isComm [] = True
     isComm (d:_) = not (isOperChar d)
-lex loc ('s':'"':'"':'"':cs) = lexLitStr loc (addCol loc 4) (mkInterp loc) isTrip   multiLine interpSkip cs
-lex loc ('s':'"':        cs) = lexLitStr loc (addCol loc 2) (mkInterp loc) isDQuote id        interpSkip cs
-lex loc (d:cs) | isLower_ d =
+lex js loc ('s':'"':'"':'"':cs) = lexLitStr js loc (addCol loc 4) (mkInterp loc) isTrip   multiLine (interpSkip js) cs
+lex js loc ('s':'"':        cs) = lexLitStr js loc (addCol loc 2) (mkInterp loc) isDQuote id        (interpSkip js) cs
+lex js loc (d:cs) | isLower_ d =
   case spanIdent cs of
-    (ds, rs) -> tIdent loc [] (d:ds) (lex (addCol loc $ 1 + length ds) rs)
-lex loc cs@(d:_) | isUpper d = upperIdent loc loc [] cs
-lex loc ('0':x:cs)
-  | toLower x == 'x' = readNum isHexDigit 16 2 loc cs
-  | toLower x == 'o' = readNum isOctDigit 8 2 loc cs
-  | toLower x == 'b' = readNum isBinDigit 2 2 loc cs
+    (ds, rs) -> tIdent loc [] (d:ds) (lex js (addCol loc $ 1 + length ds) rs)
+lex js loc cs@(d:_) | isUpper d = upperIdent js loc loc [] cs
+lex js loc ('0':x:cs)
+  | toLower x == 'x' = readNum js isHexDigit 16 2 loc cs
+  | toLower x == 'o' = readNum js isOctDigit 8 2 loc cs
+  | toLower x == 'b' = readNum js isBinDigit 2 2 loc cs
   where isBinDigit c = c == '0' || c == '1'
-lex loc cs@(d:_) | isDigit d = readNum isDigit 10 0 loc cs
-lex loc ('.':cs@(d:_)) | isLower_ d =
-  TSpec loc '.' : lex (addCol loc 1) cs
+lex js loc cs@(d:_) | isDigit d = readNum js isDigit 10 0 loc cs
+lex js loc ('.':cs@(d:_)) | isLower_ d =
+  TSpec loc '.' : lex js (addCol loc 1) cs
 -- '(#' starts an unboxed tuple when its bracket is closed by '#)', as in
 -- (# a, b #), (# #), (##) or (#-1, x #): the body is then lexed on its own,
 -- so a '#)' met anywhere else is the operator '#' and ')', as in the section
 -- (x #).  Otherwise '(#' is '(' followed by an operator whose name begins
 -- with '#': (#), (#>), or a section like (#> 1) or (# x).
-lex loc ('(':dcs@(d:cs))
+lex js loc ('(':dcs@(d:cs))
   | d == '#' =
-    case hashClose (500::Int) (0::Int) $ lex (addCol loc 2) cs of
+    case hashClose (500::Int) (0::Int) $ lex js (addCol loc 2) cs of
       Just ts -> TSpec loc 'L' : ts
-      Nothing -> TSpec loc '(' : lexOper (addCol loc 1) dcs
-  | otherwise  = TSpec loc '(' : lex (addCol loc 1) dcs
+      Nothing -> TSpec loc '(' : lexOper js (addCol loc 1) dcs
+  | otherwise  = TSpec loc '(' : lex js (addCol loc 1) dcs
   where -- Look for a closing #) within a small (n tokens) distance.
         -- The #) is recognized as two separate tokens and merged,
         -- otherwise #) could be accidentally recognized outside a (#.
@@ -144,31 +148,55 @@ lex loc ('(':dcs@(d:cs))
                 par (TSpec _ ')') = p-1
                 par _             = p
 -- Recognize #line 123 "file/name.hs"
-lex loc ('#':xcs) | (SLoc _ _ 1) <- loc, Just cs <- stripPrefix "line " xcs =
+lex js loc ('#':xcs) | (SLoc _ _ 1) <- loc, Just cs <- stripPrefix "line " xcs =
   case span (/= '\n') cs of
-    (line, rs) -> lex (fromMaybe loc (lineDirective loc line)) rs
+    (line, rs) -> lex js (fromMaybe loc (lineDirective loc line)) rs
                   | (SLoc _ 1 1) <- loc, take 1 xcs == "!" =
   -- It's a shebang (#!), ignore the rest of the line
-  skipLine loc xcs
-lex loc ('!':' ':cs) =  -- ! followed by a space is always an operator
-  TIdent loc [] "!" : lex (addCol loc 2) cs
-lex loc (c:cs@(d:_)) | isSpecSing c && not (isOperChar d) = -- handle reserved
+  skipLine js loc xcs
+lex js loc ('!':' ':cs) =  -- ! followed by a space is always an operator
+  TIdent loc [] "!" : lex js (addCol loc 2) cs
+lex js loc (c:cs@(d:_)) | isSpecSing c && not (isOperChar d) = -- handle reserved
   TSpec loc c :
-    let ts = lex (addCol loc 1) cs
+    let ts = lex js (addCol loc 1) cs
     in  if c == '\\' then tLam ts else ts
-lex loc dcs@(d:_) | isOperChar d = lexOper loc dcs
-lex loc (d:cs) | isSpec d =
-  TSpec loc d : lex (addCol loc 1) cs
-lex loc ('"':'"':'"':cs) = lexLitStr loc (addCol loc 3) (\ _ s -> [TString loc s]) isTrip   multiLine (\ _ _ -> Nothing) cs
-lex loc ('"':cs)         = lexLitStr loc (addCol loc 1) (\ _ s -> [TString loc s]) isDQuote id        (\ _ _ -> Nothing) cs
-lex loc ('\'':cs)        = lexLitStr loc (addCol loc 1) tchar                      isSQuote id        (\ _ _ -> Nothing) cs
+lex js loc dcs@(d:_) | isOperChar d = lexOper js loc dcs
+-- [js| ... |] is inline JavaScript (see GHC.Wasm.Marshal), only recognized
+-- with a JavaScript target; with other targets [js|x<-xs] is a list comprehension.
+lex True loc ('[':'j':'s':'|':cs) = lexJS loc (addCol loc 4) cs
+lex js loc (d:cs) | isSpec d =
+  TSpec loc d : lex js (addCol loc 1) cs
+lex js loc ('"':'"':'"':cs) = lexLitStr js loc (addCol loc 3) (\ _ s -> [TString loc s]) isTrip   multiLine (\ _ _ -> Nothing) cs
+lex js loc ('"':cs)         = lexLitStr js loc (addCol loc 1) (\ _ s -> [TString loc s]) isDQuote id        (\ _ _ -> Nothing) cs
+lex js loc ('\'':cs)        = lexLitStr js loc (addCol loc 1) tchar                      isSQuote id        (\ _ _ -> Nothing) cs
   where isSQuote ('\'':_) = Just 1
         isSQuote _ = Nothing
         tchar _ [c] = [TChar loc c]
         tchar _ _   = [TError loc "Illegal Char literal"]
 
-lex loc (d:_) = [TError loc $ "Unrecognized input: " ++ show d]
-lex loc [] = [TEnd loc]
+lex js loc (d:_) = [TError loc $ "Unrecognized input: " ++ show d]
+lex js loc [] = [TEnd loc]
+
+-- Lex a [js| ... |] quote.  The JavaScript code is kept verbatim (no escapes,
+-- no layout), except that ${expr} interpolates a Haskell expression, lexed
+-- with the same markers as in s"..." strings.  The tokens are
+--   J (string | $ expr %)* K
+lexJS :: SLoc -> SLoc -> String -> [Token]
+lexJS oloc aloc acs = TSpec oloc 'J' : loop aloc aloc [] acs
+  where
+    -- the location of the current string piece, the current location,
+    -- the string piece (reversed), and the input
+    loop :: SLoc -> SLoc -> String -> String -> [Token]
+    loop sl l rs ('|':']':cs) = str sl rs ++ TSpec l 'K' : lex True (addCol l 2) cs
+    loop sl l rs cs | Just (ts, cs', l') <- interpSkip True l cs = str sl rs ++ ts ++ loop l' l' [] cs'
+    loop sl l rs ('\n':cs) = loop sl (incrLine l) ('\n':rs) cs
+    loop sl l rs ('\t':cs) = loop sl (tabCol l)   ('\t':rs) cs
+    loop sl l rs ('\r':cs) = loop sl l rs cs
+    loop sl l rs (c:cs)    = loop sl (addCol l 1) (c:rs) cs
+    loop _  _ _  []        = [TError oloc "Unterminated [js| quote"]
+
+    str _ [] = []
+    str l rs = [TString l (reverse rs)]
 
 isTrip, isDQuote :: String -> Maybe Int
 isTrip ('"':'"':'"':_) = Just 3
@@ -176,14 +204,14 @@ isTrip _ = Nothing
 isDQuote ('"':_) = Just 1
 isDQuote _ = Nothing
 
-nested :: SLoc -> [Char] -> [Token]
-nested loc ('#':cs) = pragma loc cs
-nested loc cs = skipNest loc 1 cs
+nested :: Bool -> SLoc -> [Char] -> [Token]
+nested js loc ('#':cs) = pragma js loc cs
+nested js loc cs = skipNest js loc 1 cs
 
 -- Used to skip # after numbers
-lexSkipHash :: SLoc -> String -> [Token]
-lexSkipHash loc ('#':cs) = lexSkipHash (addCol loc 1) cs
-lexSkipHash loc cs = lex loc cs
+lexSkipHash :: Bool -> SLoc -> String -> [Token]
+lexSkipHash js loc ('#':cs) = lexSkipHash js (addCol loc 1) cs
+lexSkipHash js loc cs = lex js loc cs
 
 readIntBase :: Integer -> (Char -> Bool) -> String -> Maybe (Integer, Int, String)
 readIntBase base isDig ds =
@@ -200,8 +228,8 @@ readIntBase base isDig ds =
 
     addDigit x d = x * base + toInteger (digitToInt d)
 
-readNum :: (Char -> Bool) -> Integer -> Int -> SLoc -> String -> [Token]
-readNum isBaseDigit base prefixLen loc cs =
+readNum :: Bool -> (Char -> Bool) -> Integer -> Int -> SLoc -> String -> [Token]
+readNum js isBaseDigit base prefixLen loc cs =
   case readIntB cs of
     Just (n, nLen, rest) ->
       case rest of
@@ -210,13 +238,13 @@ readNum isBaseDigit base prefixLen loc cs =
             Just (m, mLen, rest') ->
               let q = toRational n + toRational m * fromInteger base ^^ negate (length $ filter isBaseDigit $ take mLen rs)
               in case expo rest' of
-                Just (ebase, e, eLen, rest'') -> TRat loc (q * fromInteger ebase ^^ e) : lexSkipHash (addCol loc (prefixLen + nLen + 1 + mLen + eLen)) rest''
-                Nothing -> TRat loc q : lexSkipHash (addCol loc (prefixLen + nLen + 1 + mLen)) rest'
-            Nothing -> TInt loc n : lexSkipHash (addCol loc (prefixLen + nLen)) rest -- this can't happen
+                Just (ebase, e, eLen, rest'') -> TRat loc (q * fromInteger ebase ^^ e) : lexSkipHash js (addCol loc (prefixLen + nLen + 1 + mLen + eLen)) rest''
+                Nothing -> TRat loc q : lexSkipHash js (addCol loc (prefixLen + nLen + 1 + mLen)) rest'
+            Nothing -> TInt loc n : lexSkipHash js (addCol loc (prefixLen + nLen)) rest -- this can't happen
         _ ->
           case expo rest of
-            Just (ebase, e, eLen, rest') ->  TRat loc (toRational n * fromInteger ebase ^^ e) : lexSkipHash (addCol loc (prefixLen + nLen + eLen)) rest'
-            Nothing -> TInt loc n : lexSkipHash (addCol loc (prefixLen + nLen)) rest
+            Just (ebase, e, eLen, rest') ->  TRat loc (toRational n * fromInteger ebase ^^ e) : lexSkipHash js (addCol loc (prefixLen + nLen + eLen)) rest'
+            Nothing -> TInt loc n : lexSkipHash js (addCol loc (prefixLen + nLen)) rest
     Nothing -> [TError loc "No digits in number"]
   where
     readIntDec = readIntBase 10 isDigit
@@ -250,21 +278,21 @@ readNum isBaseDigit base prefixLen loc cs =
     go _ _ = Nothing
 
 -- Skip a {- -} style comment
-skipNest :: SLoc -> Int -> String -> [Token]
-skipNest loc 0 cs           = lex loc cs
-skipNest loc n ('{':'-':cs) = skipNest (addCol loc 2) (n + 1) cs
-skipNest loc n ('-':'}':cs) = skipNest (addCol loc 2) (n - 1) cs
-skipNest loc n ('\n':cs)    = skipNest (incrLine loc)  n      cs
-skipNest loc n ('\t':cs)    = skipNest (tabCol loc)    n      cs
-skipNest loc n ('\r':cs)    = skipNest loc             n      cs
-skipNest loc n (_:cs)       = skipNest (addCol loc 1)  n      cs
-skipNest loc _ []           = [TError loc "Unclosed {- comment"]
+skipNest :: Bool -> SLoc -> Int -> String -> [Token]
+skipNest js loc 0 cs           = lex js loc cs
+skipNest js loc n ('{':'-':cs) = skipNest js (addCol loc 2) (n + 1) cs
+skipNest js loc n ('-':'}':cs) = skipNest js (addCol loc 2) (n - 1) cs
+skipNest js loc n ('\n':cs)    = skipNest js (incrLine loc)  n      cs
+skipNest js loc n ('\t':cs)    = skipNest js (tabCol loc)    n      cs
+skipNest js loc n ('\r':cs)    = skipNest js loc             n      cs
+skipNest js loc n (_:cs)       = skipNest js (addCol loc 1)  n      cs
+skipNest js loc _ []           = [TError loc "Unclosed {- comment"]
 
 -- Skip a -- style comment
-skipLine :: SLoc -> String -> [Token]
-skipLine loc cs@('\n':_) = lex loc cs
-skipLine loc (_:cs)      = skipLine loc cs
-skipLine loc []          = lex loc []
+skipLine :: Bool -> SLoc -> String -> [Token]
+skipLine js loc cs@('\n':_) = lex js loc cs
+skipLine js loc (_:cs)      = skipLine js loc cs
+skipLine js loc []          = lex js loc []
 
 -- | Takes a list of tokens and produces a list of tokens. If the first token in
 -- the input list is a TIndent, the input is returned unaltered. Otherwise, a
@@ -273,12 +301,12 @@ tIndent :: [Token] -> [Token]
 tIndent ts@(TIndent _ : _) = ts
 tIndent ts = TIndent (tokensLoc ts) : ts
 
-lexLitStr :: SLoc -> SLoc -> ([[Token]] -> String -> [Token]) -> (String -> Maybe Int) ->
+lexLitStr :: Bool -> SLoc -> SLoc -> ([[Token]] -> String -> [Token]) -> (String -> Maybe Int) ->
              (String -> String) -> (SLoc -> String -> Maybe ([Token], String, SLoc)) -> String -> [Token]
-lexLitStr oloc loc mk end post interp acs = loop loc [] [] acs
+lexLitStr js oloc loc mk end post interp acs = loop loc [] [] acs
   where
         loop :: SLoc -> String -> [[Token]] -> String -> [Token]
-        loop l rs tss cs | Just k <- end cs   = mk (reverse tss) (decodeEscs $ post $ reverse rs) ++ lex (addCol l k) (drop k cs)
+        loop l rs tss cs | Just k <- end cs   = mk (reverse tss) (decodeEscs $ post $ reverse rs) ++ lex js (addCol l k) (drop k cs)
                          | Just (ts, cs', l') <- interp l cs = loop l' (chMark : rs) (ts : tss) cs'
         loop l rs tss ('\\':c:cs) | isSpace c = remGap l rs tss cs
         loop l rs tss ('\\':'^':'\\':cs)      = loop (addCol l 3) ('\\':'^':'\\':rs) tss cs  -- special hack for unescaped \
@@ -400,30 +428,30 @@ isSpecSing _ = False
 
 -- Called with current location, starting location, qualifiers so far (reverse),
 -- and string to parse.
-upperIdent :: SLoc -> SLoc -> [String] -> String -> [Token]
+upperIdent :: Bool -> SLoc -> SLoc -> [String] -> String -> [Token]
 --upperIdent l c qs acs | trace (show (l, c, qs, acs)) False = undefined
-upperIdent loc sloc qs acs =
+upperIdent js loc sloc qs acs =
   case span isIdentChar acs of
    (ds, rs) ->
     case rs of
                    -- qualified string, maybe with interpolation
       '.':cs@(d1:d2:_) | d1 == '"' || d1 == 's' && d2 == '"'    -- M."..." or M.s"..."
-                                  -> TQual sloc (reverse (ds:qs)) : lex (addCol loc $ 1 + length ds) cs
+                                  -> TQual sloc (reverse (ds:qs)) : lex js (addCol loc $ 1 + length ds) cs
 
       '.':cs@(d:_) -- either another module name or a qualified uppercase identifier
-                   | isUpper d    -> upperIdent (addCol loc $ 1 + length ds) sloc (ds:qs) cs
+                   | isUpper d    -> upperIdent js (addCol loc $ 1 + length ds) sloc (ds:qs) cs
                    -- qualified lower case identifier
                    | isLower_ d   -> ident (spanIdent cs)
                    -- qualified operator
                    | isOperChar d -> ident (span isOperChar cs)
                    -- could add qualified numbers here
          where
-           ident (xs, ys) = tIdent sloc (reverse (ds:qs)) xs (lex (addCol loc $ 1 + length ds + length xs) ys)
+           ident (xs, ys) = tIdent sloc (reverse (ds:qs)) xs (lex js (addCol loc $ 1 + length ds + length xs) ys)
       -- Identifier with trailing #
       '#':_ -> mk (ds ++ hs) rs' where (hs, rs') = span (== '#') rs
       _ -> mk ds rs
   where
-     mk ds rs = TIdent sloc (reverse qs) ds : lex (addCol loc $ length ds) rs
+     mk ds rs = TIdent sloc (reverse qs) ds : lex js (addCol loc $ length ds) rs
 
 spanIdent :: String -> (String, String)
 spanIdent s = mk $ span isIdentChar s
@@ -472,14 +500,14 @@ readInt :: String -> Int
 readInt = foldl (\ r c -> r * 10 + digitToInt c) 0
 
 -- XXX This is a pretty hacky recognition of pragmas.
-pragma :: SLoc -> [Char] -> [Token]
-pragma loc cs =
-  let skip = skipNest loc 1 ('#':cs)
+pragma :: Bool -> SLoc -> [Char] -> [Token]
+pragma js loc cs =
+  let skip = skipNest js loc 1 ('#':cs)
       (p, rest) = break isSpace (dropWhile isSpace cs)
   in  case map toUpper p of
         "SOURCE" -> TPragma loc p : skip
         -- hsc2hs generates LINE pragmas
-        "LINE" | Just loc' <- lineDirective loc rest -> skipNest loc' 1 ('#':cs)
+        "LINE" | Just loc' <- lineDirective loc rest -> skipNest js loc' 1 ('#':cs)
         _ -> skip
 
 -- Parse the arguments of a '#line 123 "file/name.hs"' directive or a LINE pragma.
@@ -565,8 +593,9 @@ lexStart ts =
   where skip (TIndent _ : rs) = rs
         skip rs = rs
 
-lexTopLS :: FilePath -> String -> LexState
-lexTopLS f s = LS $ layoutLS (lexStart $ lex (SLoc f 1 1) s) []
+-- The Bool enables the [js| ... |] syntax (JavaScript targets).
+lexTopLS :: Bool -> FilePath -> String -> LexState
+lexTopLS js f s = LS $ layoutLS (lexStart $ lex js (SLoc f 1 1) s) []
   -- error $ show $ map showToken $ lex (SLoc f 1 1) s
 
 -------
@@ -580,8 +609,8 @@ lexTopLS f s = LS $ layoutLS (lexStart $ lex (SLoc f 1 1) s) []
 -- Return the (yokens for characters skipped, rest, new location)
 -- Complicated because we want to keep all characters inside ${...},
 -- but also correctly identifying the closing }, whilst tracking the location.
-interpSkip :: SLoc -> String -> Maybe ([Token], String, SLoc)
-interpSkip aloc ('$':'{':acs) =
+interpSkip :: Bool -> SLoc -> String -> Maybe ([Token], String, SLoc)
+interpSkip js aloc ('$':'{':acs) =
 --  trace ("interpSkip " ++ acs) $
   skip 0 "" aloc' acs
   where aloc' = addCol aloc 2
@@ -637,10 +666,10 @@ interpSkip aloc ('$':'{':acs) =
         -- lex an expression to be interpolated.  Add interpolation markers.
         recLex :: SLoc -> String -> [Token]
         recLex l s = [TSpec l '$'] ++ init ls ++ [TSpec ll '%']
-          where ls = lex l s
+          where ls = lex js l s
                 ll = tokensLoc [last ls]
 
-interpSkip _ _ = Nothing
+interpSkip _ _ _ = Nothing
 
 -- Splice in the interpolated tokens into the string
 mkInterp :: SLoc -> [[Token]] -> String -> [Token]

@@ -207,7 +207,7 @@ compileModule flags impt mn pathfn file = do
       chksum = fromMaybe undefined mchksum
   when (verbosityGT flags 4) $
     liftIO $ putStrLn $ "parsing: " ++ pathfn
-  let pmdl@(EModule mnn _ _) = parseDie pTop pathfn file
+  let pmdl@(EModule mnn _ _) = parseDie (jsTarget flags) pTop pathfn file
   -- Remember the module under the name from the parsed file.
   modify $ case impt of
              ImpNormal -> addWorking mnn
@@ -217,7 +217,7 @@ compileModule flags impt mn pathfn file = do
     liftIO $ putStrLn $ "parsed:\n" ++ prettyShow pmdl
   when (isNothing (getFileName mn) && mn /= mnn) $
     mhsError $ "module name does not agree with file name: " ++ showIdent mn ++ " " ++ showIdent mnn
-  ((dmdl, syms, imported, tTCDesug, tImp), _) <- compileModuleP flags impt (addPreludeImport pmdl)
+  ((dmdl, syms, imported, tTCDesug, tImp), _) <- compileModuleP flags impt (addPreludeImport (jsTarget flags) pmdl)
 
   t4 <- liftIO getTimeMilli
   cmdl <- liftIO $ evaluate $ compileToCombinators dmdl
@@ -273,13 +273,15 @@ compileToCombinators dmdl =
 -- Add implicit imports:
 --   import Prelude
 --   import Mhs.Builting as B@
+--   import GHC.Wasm.Marshal ()      -- with a JavaScript target, for the instances used by [js| ... |]
 -- No implicitr imports are added when
 --   import qualified Prelude()
 -- is present.
-addPreludeImport :: EModule -> EModule
-addPreludeImport (EModule mn es ds) =
+addPreludeImport :: Bool -> EModule -> EModule
+addPreludeImport js (EModule mn es ds) =
   EModule mn es ds'
   where ds' = ps' ++ nps
+        ijs = [Import $ ImportSpec ImpNormal False (mkIdent "GHC.Wasm.Marshal") Nothing (Just (False, [])) | js]
         (ps, nps) = partition isImportPrelude ds
         isImportPrelude (Import (ImportSpec _ _ i _ _)) = i == idPrelude
         isImportPrelude _ = False
@@ -288,9 +290,9 @@ addPreludeImport (EModule mn es ds) =
         ps' =
           case ps of
             [] -> [Import $ ImportSpec ImpNormal False idPrelude Nothing Nothing,      -- no Prelude imports, so add 'import Prelude'
-                   iblt]                                                               -- and 'import Mhs.Builtin as B@'
+                   iblt] ++ ijs                                                        -- and 'import Mhs.Builtin as B@'
             [Import (ImportSpec ImpNormal True _ Nothing (Just (False, [])))] -> []    -- exactly 'import qualified Prelude()', so import nothing
-            _ -> iblt : ps                                                             -- keep the given Prelude imports, add Builtin
+            _ -> iblt : ijs ++ ps                                                      -- keep the given Prelude imports, add Builtin
 
 -------------------------------------------
 

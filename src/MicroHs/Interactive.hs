@@ -406,8 +406,9 @@ oneline aline = do
 
 tryParse :: forall a . -- Show a =>
             P a -> String -> (String -> I ()) -> (String -> I ()) -> I ()
-tryParse p s ok bad =
-  case parse p "" s of
+tryParse p s ok bad = do
+  flgs <- gets isFlags
+  case parse (jsTarget flgs) p "" s of
     Right _ -> ok s
     Left  e -> bad e
 
@@ -417,11 +418,11 @@ tryCompile file = trySIO $ compile file
 compile :: String -> I ([LDef], TCState)
 compile file = do
 --  putStrLnI $ "tryCompile:\n" ++ file
-  let mdl@(EModule mn es _) = parseDie pTopModule "" file
+  flgs <- gets isFlags
+  let mdl@(EModule mn es _) = parseDie (jsTarget flgs) pTopModule "" file
   defs <- updateTCStateCache mdl
   (_, tcstate, _) <- gets isCComp
   let mdl' = EModule mn es (SetTCState (tcStateToXTCState tcstate) : defs)
-  flgs <- gets isFlags
   cash <- gets isCache
 --  putStrLnI $ " tryCompile compile " ++ show mdl'
   ((dmdl, _, tcstate'), _) <- liftIO $ runStateIO (compileInteractive flgs mdl') cash
@@ -523,7 +524,7 @@ updateTCStateCache (EModule mn es ds) = do
     flgs <- gets isFlags
     cash <- gets isCache
 --    putStrLnI "*** update tcstate"
-    let mdl' = addPreludeImport mdl
+    let mdl' = addPreludeImport (jsTarget flgs) mdl
     ((_, syms, tcstate), ch) <- liftIO $ runStateIO (compileInteractive flgs mdl') cash
     let idmap = translateMap $ concatMap tBindingsOf $ cachedModules ch
 --    putStrLnI $ "*** update isFast " ++ show nImps

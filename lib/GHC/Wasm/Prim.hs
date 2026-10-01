@@ -39,7 +39,7 @@ module GHC.Wasm.Prim(
   syncCallback', syncCallback1', syncCallback2', syncCallback3',
   asyncCallback, asyncCallback1, asyncCallback2, asyncCallback3,
   ) where
-import Prelude
+import qualified Prelude(); import MiniPrelude
 import Control.Exception.Internal(JSException(..))
 import qualified Data.ByteString as BS
 import Data.Text(Text, pack, unpack)
