@@ -3,6 +3,7 @@ module MicroHs.Flags(
   DumpFlag(..), dumpIf,
   wantGMP, jsTarget) where
 import qualified Prelude(); import MHSPrelude
+import Data.Maybe(isJust)
 import MicroHs.Config
 
 data Flags = Flags {
@@ -52,7 +53,7 @@ data Flags = Flags {
 jsTarget :: Flags -> Bool
 jsTarget flags =
   case lookup (target flags) (config flags) of
-    Just sect -> lookup "js" sect /= Nothing
+    Just sect -> isJust (lookup "js" sect)
     Nothing   -> False
 
 verbosityGT :: Flags -> Int -> Bool

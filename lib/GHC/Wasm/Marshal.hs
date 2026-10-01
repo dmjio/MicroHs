@@ -130,7 +130,7 @@ instance FromJSVal [Char] where
 instance {-# OVERLAPPABLE #-} ToJSVal a => ToJSVal [a] where
   toJSVal xs = do
     arr <- js_newArray
-    mapM_ (\ x -> toJSVal x >>= js_push arr) xs
+    mapM_ (toJSVal >=> js_push arr) xs
     return arr
 
 instance {-# OVERLAPPABLE #-} FromJSVal a => FromJSVal [a] where
@@ -138,7 +138,7 @@ instance {-# OVERLAPPABLE #-} FromJSVal a => FromJSVal [a] where
     ok <- js_isArray v
     if ok then do
       n <- js_length v
-      sequence <$> mapM (\ i -> js_index v i >>= fromJSVal) [0 .. n - 1]
+      sequence <$> mapM (js_index v >=> fromJSVal) [0 .. n - 1]
      else
       return Nothing
 
