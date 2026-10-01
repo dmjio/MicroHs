@@ -418,6 +418,14 @@ void GETCPUTIME(long *sec, long *nsec) { *sec = 0; *nsec = 0; }
 #define INLINE inline
 #endif  /* !define(INLINE) */
 
+#if !defined(NOINLINE)
+#if defined(__GNUC__) || defined(__clang__)
+#define NOINLINE __attribute__((noinline))
+#else
+#define NOINLINE
+#endif
+#endif  /* !defined(NOINLINE) */
+
 #if !defined(NORETURN)
 /*#define NORETURN [[noreturn]]*/
 #define NORETURN _Noreturn
@@ -425,7 +433,11 @@ void GETCPUTIME(long *sec, long *nsec) { *sec = 0; *nsec = 0; }
 
 #if !defined(PACKED)
 #if WORD_SIZE == 32
-#define PACKED __attribute__((packed))
+/* No padding for 64 bit values, but nodes are still word aligned.
+ * Without aligned(4) every field access is an unaligned access,
+ * which emscripten -sWASM=0 turns into four byte accesses.
+ */
+#define PACKED __attribute__((packed, aligned(4)))
 #else
 #define PACKED
 #endif  /* WORD_SIZE == 32 */
@@ -1369,6 +1381,16 @@ handle_sigint(int s)
 }
 #endif
 
+static NOINLINE void
+gc_check_gc(size_t k)
+{
+#if WANT_STDIO
+  if (verbose > 1)
+    PRINT("gc_check: %d\n", (int)k);
+#endif
+  gc();
+}
+
 /* Check that there are k nodes available, if not then GC. */
 INLINE void
 gc_check(size_t k)
@@ -1379,11 +1401,7 @@ gc_check(size_t k)
 #endif
       )
     return;
-#if WANT_STDIO
-  if (verbose > 1)
-    PRINT("gc_check: %d\n", (int)k);
-#endif
-  gc();
+  gc_check_gc(k);
 }
 
 /* Add the thread to the tail of runq */
@@ -2253,7 +2271,12 @@ static INLINE void mark_all_free(void)
   next_scan_index = heap_start;
 }
 
+#if SMALL_EVALI
+/* Keep evali small, see evali_cold. */
+static NOINLINE NODEPTR
+#else
 static INLINE NODEPTR
+#endif
 alloc_node(enum node_tag t)
 {
   heapoffs_t i = next_scan_index / BITS_PER_WORD;
@@ -5478,6 +5501,32 @@ rnf(value_t noerr, NODEPTR n)
   FREE(done);
 }
 
+/*
+ * Evaluate x with the exception handler h, returns NIL if an exception occurred.
+ * The setjmp is kept out of evali, because with emscripten's JavaScript
+ * setjmp/longjmp (used with -sWASM=0) every call made by a function that
+ * calls setjmp goes through a slow JavaScript wrapper.
+ */
+static NOINLINE NODEPTR
+eval_catch(struct handler *h, NODEPTR x)
+{
+  if (setjmp(h->hdl_buf))
+    return NIL;
+  return evali(x);
+}
+
+/* Where evali continues after evali_cold.  Not a pointer argument, since taking the address of n in evali is slow. */
+static enum eval_go { GO_TOP, GO_AP, GO_AP2, GO_RET, GO_TRUE, GO_FALSE } evali_cold_go;
+static NOINLINE NODEPTR evali_cold(enum node_tag tag, NODEPTR n, stackptr_t stk);
+#if SMALL_EVALI
+/* emscripten's optimizer (binaryen) inlines a function with a single caller,
+ * regardless of noinline, so call evali_cold through a pointer it cannot see through. */
+static NODEPTR (* volatile evali_cold_ptr)(enum node_tag, NODEPTR, stackptr_t) = evali_cold;
+#define EVALI_COLD evali_cold_ptr
+#else
+#define EVALI_COLD evali_cold
+#endif
+
 /* Evaluate a node, returns when the node is in WHNF. */
 NODEPTR
 evali(NODEPTR an)
@@ -5485,19 +5534,12 @@ evali(NODEPTR an)
   NODEPTR n = an;
   stackptr_t stk = stack_ptr;
   NODEPTR x, y, z, w;
-  value_t xi, yi, r;
-  struct forptr *xfp;
-  char *msg;
+  value_t r;
 #if 0
   heapoffs_t l;
 #endif
   enum node_tag tag;
-  struct ioarray *arr;
   struct bytestring xbs, ybs, rbs;
-#if WANT_STDIO
-  void *bfile;
-  int hdr;
-#endif  /* WANT_STDIO */
 
 #if MAXSTACKDEPTH
   counter_t old_cur_c_stack = cur_c_stack;
@@ -5852,6 +5894,490 @@ evali(NODEPTR an)
     PUSH(combUNINT1);
     goto top;
 
+
+  case T_SEQ:  CHECK(2); evali(ARG(TOP(0))); POP(2); n = TOP(-1); y = ARG(n); GOIND(y); /* seq x y = eval(x); y */
+
+  case T_IO_BIND:
+    goto t_c;
+  case T_IO_RETURN:
+    goto t_p;
+  case T_IO_THEN:
+    GCCHECK(2);
+    CHKARG2;
+    GOAP2(combIOBIND, x, new_ap(combK, y));
+  default:
+    n = EVALI_COLD(tag, n, stk);
+    switch (evali_cold_go) {
+    case GO_TOP:   goto top;
+    case GO_AP:    goto ap;
+    case GO_AP2:   goto ap2;
+    case GO_RET:   goto ret;
+    case GO_TRUE:  goto lbltrue;
+    case GO_FALSE: goto lblfalse;
+    }
+  }
+
+
+ ret:
+  if (stack_ptr != stk) {
+    // In this case, n was an AP that got pushed and potentially
+    // updated.
+    uvalue_t xu, yu, ru;
+#if WANT_INT64
+    uint64_t x64u, y64u, r64u;
+#endif  /* WANT_INT64 */
+#if WANT_FLOAT32
+    flt32_t xf, yf, rf;
+#endif  /* WANT_FLOAT32 */
+#if WANT_FLOAT64
+    flt64_t xd, yd, rd;
+#endif  /* WANT_FLOAT64 */
+    NODEPTR p;
+
+    tag = GETTAG(TOP(0));
+    switch (tag) {
+    case T_BININT2:
+      n = ARG(TOP(1));
+      TOP(0) = combBININT1;
+      goto top;
+
+    case T_BININT1:
+      /* First argument */
+#if SANITY
+      if (GETTAG(n) != T_INT)
+        ERR("BININT 0");
+#endif  /* SANITY */
+    binint1:
+      xu = (uvalue_t)GETVALUE(n);
+      /* Second argument */
+      y = ARG(TOP(2));
+      while (GETTAG(y) == T_IND)
+        y = GETINDIR(y);
+#if SANITY
+      if (GETTAG(y) != T_INT)
+        ERR("BININT 1");
+#endif  /* SANITY */
+      yu = (uvalue_t)GETVALUE(y);
+      p = FUN(TOP(1));
+      POP(3);
+      n = TOP(-1);
+    binint:
+/* if we don't need Int64 implementation, just make Int and Int64 the same */
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto binint;
+      case T_ADD:   ADD_OVERFLOW(value_t, ru, xu, yu); break;
+      case T_SUB:   SUB_OVERFLOW(value_t, ru, xu, yu); break;
+      case T_MUL:   MUL_OVERFLOW(value_t, ru, xu, yu); break;
+      case T_SUBR:  SUB_OVERFLOW(value_t, ru, yu, xu); break;
+      case T_QUOT:  if (yu == 0)
+                      raise_rts(exn_dividebyzero);
+                    else if ((value_t)xu == VALUE_MIN && (value_t)yu == -1)
+                      raise_rts(exn_overflow);
+                    else
+                      ru = (uvalue_t)((value_t)xu / (value_t)yu);
+                    break;
+      case T_REM:   if (yu == 0)
+                      raise_rts(exn_dividebyzero);
+                    else        /* this should not overflow under any circumstances */
+                      ru = (uvalue_t)((value_t)xu % (value_t)yu);
+                    break;
+      case T_UADD:  ru = xu + yu; break;
+      case T_USUB:  ru = xu - yu; break;
+      case T_UMUL:  ru = xu * yu; break;
+      case T_USUBR: ru = yu - xu; break;
+      case T_UQUOT: if (yu == 0)
+                      raise_rts(exn_dividebyzero);
+                    else
+                      ru = xu / yu;
+                    break;
+      case T_UREM:  if (yu == 0)
+                      raise_rts(exn_dividebyzero);
+                    else
+                      ru = xu % yu;
+                    break;
+      case T_AND:   ru = xu & yu; break;
+      case T_OR:    ru = xu | yu; break;
+      case T_XOR:   ru = xu ^ yu; break;
+      case T_SHL:   ru = xu << yu; break;
+      case T_SHR:   ru = xu >> yu; break;
+      case T_ASHR:  ru = (uvalue_t)((value_t)xu >> yu); break;
+
+      case T_EQ:    GOBOOL(xu == yu);
+      case T_NE:    GOBOOL(xu != yu);
+      case T_ULT:   GOBOOL(xu <  yu);
+      case T_ULE:   GOBOOL(xu <= yu);
+      case T_UGT:   GOBOOL(xu >  yu);
+      case T_UGE:   GOBOOL(xu >= yu);
+      case T_UCMP:  GOIND(xu <  yu ? combLT   : xu > yu ? combGT : combEQ);
+      case T_LT:    GOBOOL((value_t)xu <  (value_t)yu);
+      case T_LE:    GOBOOL((value_t)xu <= (value_t)yu);
+      case T_GT:    GOBOOL((value_t)xu >  (value_t)yu);
+      case T_GE:    GOBOOL((value_t)xu >= (value_t)yu);
+      case T_ICMP:  GOIND((value_t)xu <  (value_t)yu ? combLT   : (value_t)xu > (value_t)yu ? combGT : combEQ);
+
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("BININT");
+      }
+      SETINT(n, (value_t)ru);
+      goto ret;
+
+    case T_UNINT1:
+      /* The argument */
+#if SANITY
+      if (GETTAG(n) != T_INT)
+        ERR("UNINT 0");
+#endif
+      xu = (uvalue_t)GETVALUE(n);
+      p = FUN(TOP(1));
+      POP(2);
+      n = TOP(-1);
+    unint:
+      switch (GETTAG(p)) {
+      case T_IND:      p = GETINDIR(p); goto unint;
+      case T_NEG:      if ((value_t)xu == VALUE_MIN) raise_rts(exn_overflow); ru = -xu; break;
+      case T_UNEG:     ru = -xu; break;
+      case T_INV:      ru = ~xu; break;
+      case T_POPCOUNT: ru = POPCOUNT(xu); break;
+      case T_CLZ:      ru = CLZ(xu); break;
+      case T_CTZ:      ru = CTZ(xu); break;
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("UNINT");
+      }
+      SETINT(n, (value_t)ru);
+      goto ret;
+
+#if WANT_INT64
+    case T_BININT64_2:
+      n = ARG(TOP(1));
+      TOP(0) = combBININT64_1;
+      goto top;
+
+    case T_BININT64_1:
+      /* First argument */
+#if SANITY
+      if (GETTAG(n) != T_INT64) {
+        //fprintf(stderr, "tag=%s\n", TAGNAME(GETTAG(n))); fflush(stderr);
+        ERR("BININT64 0");
+      }
+#endif  /* SANITY */
+      x64u = (uint64_t)GETINT64VALUE(n);
+      /* Second argument */
+      y = ARG(TOP(2));
+      while (GETTAG(y) == T_IND)
+        y = GETINDIR(y);
+      /* The second argument to the shift ops is an int, so use a hack for that */
+      if (GETTAG(y) == T_INT64)
+        y64u = (uint64_t)GETINT64VALUE(y);
+      else if (GETTAG(y) == T_INT)
+        yu = (uvalue_t)GETVALUE(y);
+      else
+        ERR("BININT64 1");
+      p = FUN(TOP(1));
+      POP(3);
+      n = TOP(-1);
+    binint64:
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto binint64;
+      case T_ADD64: ADD_OVERFLOW(int64_t, r64u, x64u, y64u); break;
+      case T_SUB64: SUB_OVERFLOW(int64_t, r64u, x64u, y64u); break;
+      case T_MUL64: MUL_OVERFLOW(int64_t, r64u, x64u, y64u); break;
+      case T_SUBR64:SUB_OVERFLOW(int64_t, r64u, y64u, x64u); break;
+      case T_QUOT64:if (y64u == 0)
+                      raise_rts(exn_dividebyzero);
+                    else if ((int64_t)x64u == INT64_MIN && (int64_t)y64u == -1)
+                      raise_rts(exn_overflow);
+                    else
+                      r64u = (uint64_t)((int64_t)x64u / (int64_t)y64u);
+                    break;
+      case T_REM64: if (y64u == 0)
+                      raise_rts(exn_dividebyzero);
+                    else
+                      r64u = (uint64_t)((int64_t)x64u % (int64_t)y64u);
+                    break;
+      case T_UADD64:r64u = x64u + y64u; break;
+      case T_USUB64:r64u = x64u - y64u; break;
+      case T_UMUL64:r64u = x64u * y64u; break;
+      case T_USUBR64:r64u = y64u - x64u; break;
+      case T_UQUOT64:if (y64u == 0)
+                      raise_rts(exn_dividebyzero);
+                    else
+                      r64u = x64u / y64u;
+                    break;
+      case T_UREM64:if (y64u == 0)
+                      raise_rts(exn_dividebyzero);
+                    else
+                      r64u = x64u % y64u;
+                    break;
+      case T_AND64: r64u = x64u & y64u; break;
+      case T_OR64:  r64u = x64u | y64u; break;
+      case T_XOR64: r64u = x64u ^ y64u; break;
+      case T_SHL64: r64u = x64u << yu; break;
+      case T_SHR64: r64u = x64u >> yu; break;
+      case T_ASHR64:r64u = (uint64_t)((int64_t)x64u >> yu); break;
+
+      case T_EQ64:  GOBOOL(x64u == y64u);
+      case T_NE64:  GOBOOL(x64u != y64u);
+      case T_ULT64: GOBOOL(x64u <  y64u);
+      case T_ULE64: GOBOOL(x64u <= y64u);
+      case T_UGT64: GOBOOL(x64u >  y64u);
+      case T_UGE64: GOBOOL(x64u >= y64u);
+      case T_UCMP64:GOIND(x64u <  y64u ? combLT   : x64u > y64u ? combGT : combEQ);
+      case T_LT64:  GOBOOL((int64_t)x64u <  (int64_t)y64u);
+      case T_LE64:  GOBOOL((int64_t)x64u <= (int64_t)y64u);
+      case T_GT64:  GOBOOL((int64_t)x64u >  (int64_t)y64u);
+      case T_GE64:  GOBOOL((int64_t)x64u >= (int64_t)y64u);
+      case T_ICMP64:GOIND((int64_t)x64u <  (int64_t)y64u ? combLT   : (int64_t)x64u > (int64_t)y64u ? combGT : combEQ);
+
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("BININT64");
+      }
+      SETINT64(n, (int64_t)r64u);
+      goto ret;
+
+    case T_UNINT64_1:
+      /* The argument */
+#if SANITY
+      if (GETTAG(n) != T_INT64)
+        ERR("UNINT64 0");
+#endif
+      x64u = (uint64_t)GETINT64VALUE(n);
+      p = FUN(TOP(1));
+      POP(2);
+      n = TOP(-1);
+    unint64:
+      switch (GETTAG(p)) {
+      case T_IND:        p = GETINDIR(p); goto unint64;
+      case T_NEG64:      if ((int64_t)x64u == INT64_MIN) raise_rts(exn_overflow); r64u = -x64u; break;
+      case T_UNEG64:     r64u = -x64u; break;
+      case T_INV64:      r64u = ~x64u; break;
+      case T_POPCOUNT64: ru = POPCOUNT64(x64u); SETINT(n, (value_t)ru); goto ret;
+      case T_CLZ64:      ru = CLZ64(x64u); SETINT(n, (value_t)ru); goto ret;
+      case T_CTZ64:      ru = CTZ64(x64u); SETINT(n, (value_t)ru); goto ret;
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("UNINT64");
+      }
+      SETINT64(n, (int64_t)r64u);
+      goto ret;
+#endif  /* WANT_INT64 */
+
+#if WANT_FLOAT32
+    case T_BINFLT2:
+      n = ARG(TOP(1));
+      TOP(0) = combBINFLT1;
+      goto top;
+
+    case T_BINFLT1:
+      /* First argument */
+#if SANITY
+      if (GETTAG(n) != T_FLT32)
+        ERR("BINDBL 0");
+#endif  /* SANITY */
+      xf = GETFLTVALUE(n);
+      /* Second argument */
+      y = ARG(TOP(2));
+      while (GETTAG(y) == T_IND)
+        y = GETINDIR(y);
+#if SANITY
+      if (GETTAG(y) != T_FLT32)
+        ERR("BINDBL 1");
+#endif  /* SANITY */
+      yf = GETFLTVALUE(y);
+      p = FUN(TOP(1));
+      POP(3);
+      n = TOP(-1);
+    binflt:
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto binflt;
+      case T_FADD:  rf = xf + yf; break;
+      case T_FSUB:  rf = xf - yf; break;
+      case T_FMUL:  rf = xf * yf; break;
+      case T_FDIV:  rf = xf / yf; break;
+
+      case T_FEQ:   GOBOOL(xf == yf);
+      case T_FNE:   GOBOOL(xf != yf);
+      case T_FLT:   GOBOOL(xf <  yf);
+      case T_FLE:   GOBOOL(xf <= yf);
+      case T_FGT:   GOBOOL(xf >  yf);
+      case T_FGE:   GOBOOL(xf >= yf);
+
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("BINFLT");
+      }
+      SETFLT(n, rf);
+      goto ret;
+
+    case T_UNFLT1:
+      /* The argument */
+#if SANITY
+      if (GETTAG(n) != T_FLT32)
+        ERR("UNFLT 0");
+#endif
+      xf = GETFLTVALUE(n);
+      p = FUN(TOP(1));
+      POP(2);
+      n = TOP(-1);
+    unflt:
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto unflt;
+      case T_FNEG:  rf = -xf; break;
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("UNFLT");
+      }
+      SETFLT(n, rf);
+      goto ret;
+#endif  /* WANT_FLOAT32 */
+
+#if WANT_FLOAT64
+    case T_BINDBL2:
+      n = ARG(TOP(1));
+      TOP(0) = combBINDBL1;
+      goto top;
+
+    case T_BINDBL1:
+      /* First argument */
+#if SANITY
+      if (GETTAG(n) != T_DBL)
+        ERR("BINDBL 0");
+#endif  /* SANITY */
+      xd = GETDBLVALUE(n);
+      /* Second argument */
+      y = ARG(TOP(2));
+      while (GETTAG(y) == T_IND)
+        y = GETINDIR(y);
+#if SANITY
+      if (GETTAG(y) != T_DBL)
+        ERR("BINDBL 1");
+#endif  /* SANITY */
+      yd = GETDBLVALUE(y);
+      p = FUN(TOP(1));
+      POP(3);
+      n = TOP(-1);
+    bindbl:
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto bindbl;
+      case T_DADD:  rd = xd + yd; break;
+      case T_DSUB:  rd = xd - yd; break;
+      case T_DMUL:  rd = xd * yd; break;
+      case T_DDIV:  rd = xd / yd; break;
+
+      case T_DEQ:   GOBOOL(xd == yd);
+      case T_DNE:   GOBOOL(xd != yd);
+      case T_DLT:   GOBOOL(xd <  yd);
+      case T_DLE:   GOBOOL(xd <= yd);
+      case T_DGT:   GOBOOL(xd >  yd);
+      case T_DGE:   GOBOOL(xd >= yd);
+
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("BINDBL");
+      }
+      SETDBL(n, rd);
+      goto ret;
+
+    case T_UNDBL1:
+      /* The argument */
+#if SANITY
+      if (GETTAG(n) != T_DBL)
+        ERR("UNDBL 0");
+#endif
+      xd = GETDBLVALUE(n);
+      p = FUN(TOP(1));
+      POP(2);
+      n = TOP(-1);
+    undbl:
+      switch (GETTAG(p)) {
+      case T_IND:   p = GETINDIR(p); goto undbl;
+      case T_DNEG:  rd = -xd; break;
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("UNDBL");
+      }
+      SETDBL(n, rd);
+      goto ret;
+#endif  /* WANT_FLOAT64 */
+
+    case T_BINBS2:
+      n = ARG(TOP(1));
+      TOP(0) = combBINBS1;
+      goto top;
+
+    case T_BINBS1:
+      /* First argument */
+#if SANITY
+      if (GETTAG(n) != T_FORPTR || FORPTR(n)->finalizer->fptype != FP_BSTR)
+        ERR("BINBS 0");
+#endif  /* SANITY */
+      xbs = BSTR(n);
+      /* Second argument */
+      y = ARG(TOP(2));
+      while (GETTAG(y) == T_IND)
+        y = GETINDIR(y);
+#if SANITY
+      if (GETTAG(y) != T_FORPTR || FORPTR(y)->finalizer->fptype != FP_BSTR)
+        ERR("BINBS 1");
+#endif  /* SANITY */
+      ybs = BSTR(y);
+      p = FUN(TOP(1));
+      POP(3);
+      n = TOP(-1);
+    binbs:
+      switch (GETTAG(p)) {
+      case T_IND:    p = GETINDIR(p); goto binbs;
+
+      case T_BSAPPEND: rbs = bsappend(xbs, ybs); break;
+      case T_BSAPPENDDOT: rbs = bsappenddot(xbs, ybs); break;
+      case T_BSEQ:   GOBOOL(bscompare(xbs, ybs) == 0);
+      case T_BSNE:   GOBOOL(bscompare(xbs, ybs) != 0);
+      case T_BSLT:   GOBOOL(bscompare(xbs, ybs) <  0);
+      case T_BSLE:   GOBOOL(bscompare(xbs, ybs) <= 0);
+      case T_BSGT:   GOBOOL(bscompare(xbs, ybs) >  0);
+      case T_BSGE:   GOBOOL(bscompare(xbs, ybs) >= 0);
+      case T_BSCMP:  r = bscompare(xbs, ybs); GOIND(r < 0 ? combLT : r > 0 ? combGT : combEQ);
+
+      default:
+        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
+        ERR("BINBS");
+      }
+      SETBSTR(n, mkForPtrFree(rbs));
+      goto ret;
+
+    default:
+      stack_ptr = stk;
+      n = TOP(-1);
+    }
+  }
+#if MAXSTACKDEPTH
+  cur_c_stack = old_cur_c_stack; /* reset rather than counting down, in case of longjump */
+#endif
+  return n;
+}
+
+/*
+ * The rarely used reductions of evali.  evali_cold_go says where evali continues.
+ * With -DSMALL_EVALI=1 (used for emscripten -sWASM=0) they, and alloc_node,
+ * are kept out of evali: evali then becomes a JavaScript function, and V8 does
+ * not optimize a function that is too big.
+ */
+static NOINLINE NODEPTR
+evali_cold(enum node_tag tag, NODEPTR n, stackptr_t stk)
+{
+  NODEPTR x, y, z, w;
+  value_t xi, yi;
+  struct forptr *xfp;
+  char *msg;
+  struct ioarray *arr;
+#if WANT_STDIO
+  void *bfile;
+  int hdr;
+#endif  /* WANT_STDIO */
+
+  switch (tag) {
 #if WANT_FLOAT32
   case T_FADD:
   case T_FSUB:
@@ -6073,7 +6599,7 @@ evali(NODEPTR an)
       PUSH(combBININT64_1);
       if (GETTAG(n) == T_INT64) {
         //fprintf(stderr, "goto binint64_1\n"); fflush(stderr);
-        goto binint64_1;
+        goto top;             /* the value is evaluated, so this ends in binint64_1 */
       }
     } else {
       //fprintf(stderr, "push combBININT64_2\n"); fflush(stderr);
@@ -6353,7 +6879,6 @@ evali(NODEPTR an)
     POP(2);
     GOPAIRUNIT;
 
-  case T_SEQ:  CHECK(2); evali(ARG(TOP(0))); POP(2); n = TOP(-1); y = ARG(n); GOIND(y); /* seq x y = eval(x); y */
 
   case T_RNF:
     if (doing_rnf) RET;
@@ -6401,14 +6926,6 @@ evali(NODEPTR an)
     }
     break;
 
-  case T_IO_BIND:
-    goto t_c;
-  case T_IO_RETURN:
-    goto t_p;
-  case T_IO_THEN:
-    GCCHECK(2);
-    CHKARG2;
-    GOAP2(combIOBIND, x, new_ap(combK, y));
   case T_IO_LAZYBIND:
     /* Lazy bind, used for the lazy ST monad.
      * DO NOT USE FOR IO, because effects are not guaranteed to happen.
@@ -6892,7 +7409,8 @@ evali(NODEPTR an)
       cur_handler = h;
       stackptr_t ostack = stack_ptr;;    /* old stack pointer */
       enum mask_state omask = runq.mq_head->mt_mask;     /* old mask */
-      if (setjmp(h->hdl_buf)) {
+      NODEPTR r = eval_catch(h, x); /* execute first argument */
+      if (r == NIL) {
         /* An exception occurred: */
         stack_ptr = ostack;
         runq.mq_head->mt_mask = mask_interruptible; /* evaluate with mask */
@@ -6913,13 +7431,11 @@ evali(NODEPTR an)
         NODEPTR q = new_ap(new_ap(new_ap(combBB, combIOTHEN), new_ap(combSETMASKINGSTATE, mkInt(omask))), combIORETURN);
         GOAP2(p, q, z);
       } else {
-        /* Normal execution: */
-        x = evali(x);             /* execute first argument */
         /* No exception occurred */
         cur_handler = h->hdl_old; /* restore old handler */
         FREE(h);
         POP(3);
-        GOIND(x);
+        GOIND(r);
       }
     }
 
@@ -6957,446 +7473,12 @@ evali(NODEPTR an)
     ERR1("eval tag %s", TAGNAME(GETTAG(n)));
   }
 
-
- ret:
-  if (stack_ptr != stk) {
-    // In this case, n was an AP that got pushed and potentially
-    // updated.
-    uvalue_t xu, yu, ru;
-#if WANT_INT64
-    uint64_t x64u, y64u, r64u;
-#endif  /* WANT_INT64 */
-#if WANT_FLOAT32
-    flt32_t xf, yf, rf;
-#endif  /* WANT_FLOAT32 */
-#if WANT_FLOAT64
-    flt64_t xd, yd, rd;
-#endif  /* WANT_FLOAT64 */
-    NODEPTR p;
-
-    tag = GETTAG(TOP(0));
-    switch (tag) {
-    case T_BININT2:
-      n = ARG(TOP(1));
-      TOP(0) = combBININT1;
-      goto top;
-
-    case T_BININT1:
-      /* First argument */
-#if SANITY
-      if (GETTAG(n) != T_INT)
-        ERR("BININT 0");
-#endif  /* SANITY */
-    binint1:
-      xu = (uvalue_t)GETVALUE(n);
-      /* Second argument */
-      y = ARG(TOP(2));
-      while (GETTAG(y) == T_IND)
-        y = GETINDIR(y);
-#if SANITY
-      if (GETTAG(y) != T_INT)
-        ERR("BININT 1");
-#endif  /* SANITY */
-      yu = (uvalue_t)GETVALUE(y);
-      p = FUN(TOP(1));
-      POP(3);
-      n = TOP(-1);
-    binint:
-/* if we don't need Int64 implementation, just make Int and Int64 the same */
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto binint;
-      case T_ADD:   ADD_OVERFLOW(value_t, ru, xu, yu); break;
-      case T_SUB:   SUB_OVERFLOW(value_t, ru, xu, yu); break;
-      case T_MUL:   MUL_OVERFLOW(value_t, ru, xu, yu); break;
-      case T_SUBR:  SUB_OVERFLOW(value_t, ru, yu, xu); break;
-      case T_QUOT:  if (yu == 0)
-                      raise_rts(exn_dividebyzero);
-                    else if ((value_t)xu == VALUE_MIN && (value_t)yu == -1)
-                      raise_rts(exn_overflow);
-                    else
-                      ru = (uvalue_t)((value_t)xu / (value_t)yu);
-                    break;
-      case T_REM:   if (yu == 0)
-                      raise_rts(exn_dividebyzero);
-                    else        /* this should not overflow under any circumstances */
-                      ru = (uvalue_t)((value_t)xu % (value_t)yu);
-                    break;
-      case T_UADD:  ru = xu + yu; break;
-      case T_USUB:  ru = xu - yu; break;
-      case T_UMUL:  ru = xu * yu; break;
-      case T_USUBR: ru = yu - xu; break;
-      case T_UQUOT: if (yu == 0)
-                      raise_rts(exn_dividebyzero);
-                    else
-                      ru = xu / yu;
-                    break;
-      case T_UREM:  if (yu == 0)
-                      raise_rts(exn_dividebyzero);
-                    else
-                      ru = xu % yu;
-                    break;
-      case T_AND:   ru = xu & yu; break;
-      case T_OR:    ru = xu | yu; break;
-      case T_XOR:   ru = xu ^ yu; break;
-      case T_SHL:   ru = xu << yu; break;
-      case T_SHR:   ru = xu >> yu; break;
-      case T_ASHR:  ru = (uvalue_t)((value_t)xu >> yu); break;
-
-      case T_EQ:    GOBOOL(xu == yu);
-      case T_NE:    GOBOOL(xu != yu);
-      case T_ULT:   GOBOOL(xu <  yu);
-      case T_ULE:   GOBOOL(xu <= yu);
-      case T_UGT:   GOBOOL(xu >  yu);
-      case T_UGE:   GOBOOL(xu >= yu);
-      case T_UCMP:  GOIND(xu <  yu ? combLT   : xu > yu ? combGT : combEQ);
-      case T_LT:    GOBOOL((value_t)xu <  (value_t)yu);
-      case T_LE:    GOBOOL((value_t)xu <= (value_t)yu);
-      case T_GT:    GOBOOL((value_t)xu >  (value_t)yu);
-      case T_GE:    GOBOOL((value_t)xu >= (value_t)yu);
-      case T_ICMP:  GOIND((value_t)xu <  (value_t)yu ? combLT   : (value_t)xu > (value_t)yu ? combGT : combEQ);
-
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("BININT");
-      }
-      SETINT(n, (value_t)ru);
-      goto ret;
-
-    case T_UNINT1:
-      /* The argument */
-#if SANITY
-      if (GETTAG(n) != T_INT)
-        ERR("UNINT 0");
-#endif
-      xu = (uvalue_t)GETVALUE(n);
-      p = FUN(TOP(1));
-      POP(2);
-      n = TOP(-1);
-    unint:
-      switch (GETTAG(p)) {
-      case T_IND:      p = GETINDIR(p); goto unint;
-      case T_NEG:      if ((value_t)xu == VALUE_MIN) raise_rts(exn_overflow); ru = -xu; break;
-      case T_UNEG:     ru = -xu; break;
-      case T_INV:      ru = ~xu; break;
-      case T_POPCOUNT: ru = POPCOUNT(xu); break;
-      case T_CLZ:      ru = CLZ(xu); break;
-      case T_CTZ:      ru = CTZ(xu); break;
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("UNINT");
-      }
-      SETINT(n, (value_t)ru);
-      goto ret;
-
-#if WANT_INT64
-    case T_BININT64_2:
-      n = ARG(TOP(1));
-      TOP(0) = combBININT64_1;
-      goto top;
-
-    case T_BININT64_1:
-      /* First argument */
-#if SANITY
-      if (GETTAG(n) != T_INT64) {
-        //fprintf(stderr, "tag=%s\n", TAGNAME(GETTAG(n))); fflush(stderr);
-        ERR("BININT64 0");
-      }
-#endif  /* SANITY */
-    binint64_1:
-      x64u = (uint64_t)GETINT64VALUE(n);
-      /* Second argument */
-      y = ARG(TOP(2));
-      while (GETTAG(y) == T_IND)
-        y = GETINDIR(y);
-      /* The second argument to the shift ops is an int, so use a hack for that */
-      if (GETTAG(y) == T_INT64)
-        y64u = (uint64_t)GETINT64VALUE(y);
-      else if (GETTAG(y) == T_INT)
-        yu = (uvalue_t)GETVALUE(y);
-      else
-        ERR("BININT64 1");
-      p = FUN(TOP(1));
-      POP(3);
-      n = TOP(-1);
-    binint64:
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto binint64;
-      case T_ADD64: ADD_OVERFLOW(int64_t, r64u, x64u, y64u); break;
-      case T_SUB64: SUB_OVERFLOW(int64_t, r64u, x64u, y64u); break;
-      case T_MUL64: MUL_OVERFLOW(int64_t, r64u, x64u, y64u); break;
-      case T_SUBR64:SUB_OVERFLOW(int64_t, r64u, y64u, x64u); break;
-      case T_QUOT64:if (y64u == 0)
-                      raise_rts(exn_dividebyzero);
-                    else if ((int64_t)x64u == INT64_MIN && (int64_t)y64u == -1)
-                      raise_rts(exn_overflow);
-                    else
-                      r64u = (uint64_t)((int64_t)x64u / (int64_t)y64u);
-                    break;
-      case T_REM64: if (y64u == 0)
-                      raise_rts(exn_dividebyzero);
-                    else
-                      r64u = (uint64_t)((int64_t)x64u % (int64_t)y64u);
-                    break;
-      case T_UADD64:r64u = x64u + y64u; break;
-      case T_USUB64:r64u = x64u - y64u; break;
-      case T_UMUL64:r64u = x64u * y64u; break;
-      case T_USUBR64:r64u = y64u - x64u; break;
-      case T_UQUOT64:if (y64u == 0)
-                      raise_rts(exn_dividebyzero);
-                    else
-                      r64u = x64u / y64u;
-                    break;
-      case T_UREM64:if (y64u == 0)
-                      raise_rts(exn_dividebyzero);
-                    else
-                      r64u = x64u % y64u;
-                    break;
-      case T_AND64: r64u = x64u & y64u; break;
-      case T_OR64:  r64u = x64u | y64u; break;
-      case T_XOR64: r64u = x64u ^ y64u; break;
-      case T_SHL64: r64u = x64u << yu; break;
-      case T_SHR64: r64u = x64u >> yu; break;
-      case T_ASHR64:r64u = (uint64_t)((int64_t)x64u >> yu); break;
-
-      case T_EQ64:  GOBOOL(x64u == y64u);
-      case T_NE64:  GOBOOL(x64u != y64u);
-      case T_ULT64: GOBOOL(x64u <  y64u);
-      case T_ULE64: GOBOOL(x64u <= y64u);
-      case T_UGT64: GOBOOL(x64u >  y64u);
-      case T_UGE64: GOBOOL(x64u >= y64u);
-      case T_UCMP64:GOIND(x64u <  y64u ? combLT   : x64u > y64u ? combGT : combEQ);
-      case T_LT64:  GOBOOL((int64_t)x64u <  (int64_t)y64u);
-      case T_LE64:  GOBOOL((int64_t)x64u <= (int64_t)y64u);
-      case T_GT64:  GOBOOL((int64_t)x64u >  (int64_t)y64u);
-      case T_GE64:  GOBOOL((int64_t)x64u >= (int64_t)y64u);
-      case T_ICMP64:GOIND((int64_t)x64u <  (int64_t)y64u ? combLT   : (int64_t)x64u > (int64_t)y64u ? combGT : combEQ);
-
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("BININT64");
-      }
-      SETINT64(n, (int64_t)r64u);
-      goto ret;
-
-    case T_UNINT64_1:
-      /* The argument */
-#if SANITY
-      if (GETTAG(n) != T_INT64)
-        ERR("UNINT64 0");
-#endif
-      x64u = (uint64_t)GETINT64VALUE(n);
-      p = FUN(TOP(1));
-      POP(2);
-      n = TOP(-1);
-    unint64:
-      switch (GETTAG(p)) {
-      case T_IND:        p = GETINDIR(p); goto unint64;
-      case T_NEG64:      if ((int64_t)x64u == INT64_MIN) raise_rts(exn_overflow); r64u = -x64u; break;
-      case T_UNEG64:     r64u = -x64u; break;
-      case T_INV64:      r64u = ~x64u; break;
-      case T_POPCOUNT64: ru = POPCOUNT64(x64u); SETINT(n, (value_t)ru); goto ret;
-      case T_CLZ64:      ru = CLZ64(x64u); SETINT(n, (value_t)ru); goto ret;
-      case T_CTZ64:      ru = CTZ64(x64u); SETINT(n, (value_t)ru); goto ret;
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("UNINT64");
-      }
-      SETINT64(n, (int64_t)r64u);
-      goto ret;
-#endif  /* WANT_INT64 */
-
-#if WANT_FLOAT32
-    case T_BINFLT2:
-      n = ARG(TOP(1));
-      TOP(0) = combBINFLT1;
-      goto top;
-
-    case T_BINFLT1:
-      /* First argument */
-#if SANITY
-      if (GETTAG(n) != T_FLT32)
-        ERR("BINDBL 0");
-#endif  /* SANITY */
-      xf = GETFLTVALUE(n);
-      /* Second argument */
-      y = ARG(TOP(2));
-      while (GETTAG(y) == T_IND)
-        y = GETINDIR(y);
-#if SANITY
-      if (GETTAG(y) != T_FLT32)
-        ERR("BINDBL 1");
-#endif  /* SANITY */
-      yf = GETFLTVALUE(y);
-      p = FUN(TOP(1));
-      POP(3);
-      n = TOP(-1);
-    binflt:
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto binflt;
-      case T_FADD:  rf = xf + yf; break;
-      case T_FSUB:  rf = xf - yf; break;
-      case T_FMUL:  rf = xf * yf; break;
-      case T_FDIV:  rf = xf / yf; break;
-
-      case T_FEQ:   GOBOOL(xf == yf);
-      case T_FNE:   GOBOOL(xf != yf);
-      case T_FLT:   GOBOOL(xf <  yf);
-      case T_FLE:   GOBOOL(xf <= yf);
-      case T_FGT:   GOBOOL(xf >  yf);
-      case T_FGE:   GOBOOL(xf >= yf);
-
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("BINFLT");
-      }
-      SETFLT(n, rf);
-      goto ret;
-
-    case T_UNFLT1:
-      /* The argument */
-#if SANITY
-      if (GETTAG(n) != T_FLT32)
-        ERR("UNFLT 0");
-#endif
-      xf = GETFLTVALUE(n);
-      p = FUN(TOP(1));
-      POP(2);
-      n = TOP(-1);
-    unflt:
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto unflt;
-      case T_FNEG:  rf = -xf; break;
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("UNFLT");
-      }
-      SETFLT(n, rf);
-      goto ret;
-#endif  /* WANT_FLOAT32 */
-
-#if WANT_FLOAT64
-    case T_BINDBL2:
-      n = ARG(TOP(1));
-      TOP(0) = combBINDBL1;
-      goto top;
-
-    case T_BINDBL1:
-      /* First argument */
-#if SANITY
-      if (GETTAG(n) != T_DBL)
-        ERR("BINDBL 0");
-#endif  /* SANITY */
-      xd = GETDBLVALUE(n);
-      /* Second argument */
-      y = ARG(TOP(2));
-      while (GETTAG(y) == T_IND)
-        y = GETINDIR(y);
-#if SANITY
-      if (GETTAG(y) != T_DBL)
-        ERR("BINDBL 1");
-#endif  /* SANITY */
-      yd = GETDBLVALUE(y);
-      p = FUN(TOP(1));
-      POP(3);
-      n = TOP(-1);
-    bindbl:
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto bindbl;
-      case T_DADD:  rd = xd + yd; break;
-      case T_DSUB:  rd = xd - yd; break;
-      case T_DMUL:  rd = xd * yd; break;
-      case T_DDIV:  rd = xd / yd; break;
-
-      case T_DEQ:   GOBOOL(xd == yd);
-      case T_DNE:   GOBOOL(xd != yd);
-      case T_DLT:   GOBOOL(xd <  yd);
-      case T_DLE:   GOBOOL(xd <= yd);
-      case T_DGT:   GOBOOL(xd >  yd);
-      case T_DGE:   GOBOOL(xd >= yd);
-
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("BINDBL");
-      }
-      SETDBL(n, rd);
-      goto ret;
-
-    case T_UNDBL1:
-      /* The argument */
-#if SANITY
-      if (GETTAG(n) != T_DBL)
-        ERR("UNDBL 0");
-#endif
-      xd = GETDBLVALUE(n);
-      p = FUN(TOP(1));
-      POP(2);
-      n = TOP(-1);
-    undbl:
-      switch (GETTAG(p)) {
-      case T_IND:   p = GETINDIR(p); goto undbl;
-      case T_DNEG:  rd = -xd; break;
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("UNDBL");
-      }
-      SETDBL(n, rd);
-      goto ret;
-#endif  /* WANT_FLOAT64 */
-
-    case T_BINBS2:
-      n = ARG(TOP(1));
-      TOP(0) = combBINBS1;
-      goto top;
-
-    case T_BINBS1:
-      /* First argument */
-#if SANITY
-      if (GETTAG(n) != T_FORPTR || FORPTR(n)->finalizer->fptype != FP_BSTR)
-        ERR("BINBS 0");
-#endif  /* SANITY */
-      xbs = BSTR(n);
-      /* Second argument */
-      y = ARG(TOP(2));
-      while (GETTAG(y) == T_IND)
-        y = GETINDIR(y);
-#if SANITY
-      if (GETTAG(y) != T_FORPTR || FORPTR(y)->finalizer->fptype != FP_BSTR)
-        ERR("BINBS 1");
-#endif  /* SANITY */
-      ybs = BSTR(y);
-      p = FUN(TOP(1));
-      POP(3);
-      n = TOP(-1);
-    binbs:
-      switch (GETTAG(p)) {
-      case T_IND:    p = GETINDIR(p); goto binbs;
-
-      case T_BSAPPEND: rbs = bsappend(xbs, ybs); break;
-      case T_BSAPPENDDOT: rbs = bsappenddot(xbs, ybs); break;
-      case T_BSEQ:   GOBOOL(bscompare(xbs, ybs) == 0);
-      case T_BSNE:   GOBOOL(bscompare(xbs, ybs) != 0);
-      case T_BSLT:   GOBOOL(bscompare(xbs, ybs) <  0);
-      case T_BSLE:   GOBOOL(bscompare(xbs, ybs) <= 0);
-      case T_BSGT:   GOBOOL(bscompare(xbs, ybs) >  0);
-      case T_BSGE:   GOBOOL(bscompare(xbs, ybs) >= 0);
-      case T_BSCMP:  r = bscompare(xbs, ybs); GOIND(r < 0 ? combLT : r > 0 ? combGT : combEQ);
-
-      default:
-        //fprintf(stderr, "tag=%d\n", GETTAG(FUN(TOP(0))));
-        ERR("BINBS");
-      }
-      SETBSTR(n, mkForPtrFree(rbs));
-      goto ret;
-
-    default:
-      stack_ptr = stk;
-      n = TOP(-1);
-    }
-  }
-#if MAXSTACKDEPTH
-  cur_c_stack = old_cur_c_stack; /* reset rather than counting down, in case of longjump */
-#endif
-  return n;
+ top:      evali_cold_go = GO_TOP;   return n;
+ ap:       evali_cold_go = GO_AP;    return n;
+ ap2:      evali_cold_go = GO_AP2;   return n;
+ ret:      evali_cold_go = GO_RET;   return n;
+ lbltrue:  evali_cold_go = GO_TRUE;  return n;
+ lblfalse: evali_cold_go = GO_FALSE; return n;
 }
 
 static char *progname = "?";
