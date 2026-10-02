@@ -166,18 +166,46 @@ data TCState = TC {
                  ),
   constraints :: Constraints,           -- constraints that have to be solved
   defaults    :: Defaults,              -- current defaults
-  -- Two-level type theory (staging) state.
-  curLevel    :: Level,                 -- stage of the expression being checked
-  levelSubst  :: IM.IntMap Level,       -- solved level variables (not reset by tcReset)
-  levelTable  :: LevelTable,            -- stage of each global value identifier (qualified)
-  localLevels :: LevelTable,            -- stage of each local variable
-  typeLevels  :: TypeLevelTable,        -- stage signature of each type constructor and class
-  dictUses    :: M.Map [Level],         -- the stages at which each dictionary identifier is used
-  dictChecks  :: [(SLoc, Ident, [Level])],  -- deferred stage checks of uses of global values and dictionaries
-  stagedNodes :: Bool,                  -- were any EStaged nodes created for the current definition
-  levelFixes  :: Int                    -- number of level variables bound so far
+  stage       :: StageState             -- two-level type theory (staging) state
   }
   deriving (Show)
+
+-- The staging state is kept in a separate record, so that the (very frequent)
+-- updates of the other fields of TCState do not get more expensive.
+data StageState = StageState {
+  ssCurLevel    :: Level,                 -- stage of the expression being checked
+  ssLevelSubst  :: IM.IntMap Level,       -- solved level variables (not reset by tcReset)
+  ssLevelTable  :: LevelTable,            -- stage of each global value identifier (qualified)
+  ssLocalLevels :: LevelTable,            -- stage of each local variable
+  ssTypeLevels  :: TypeLevelTable,        -- stage signature of each type constructor and class
+  ssDictUses    :: M.Map [Level],         -- the stages at which each dictionary identifier is used
+  ssDictChecks  :: [(SLoc, Ident, [Level])],  -- deferred stage checks of uses of global values and dictionaries
+  ssStagedNodes :: Bool,                  -- were any EStaged nodes created for the current definition
+  ssLevelFixes  :: Int                    -- number of level variables bound so far
+  }
+  deriving (Show)
+
+curLevel :: TCState -> Level
+curLevel = ssCurLevel . stage
+levelSubst :: TCState -> IM.IntMap Level
+levelSubst = ssLevelSubst . stage
+levelTable :: TCState -> LevelTable
+levelTable = ssLevelTable . stage
+localLevels :: TCState -> LevelTable
+localLevels = ssLocalLevels . stage
+typeLevels :: TCState -> TypeLevelTable
+typeLevels = ssTypeLevels . stage
+dictUses :: TCState -> M.Map [Level]
+dictUses = ssDictUses . stage
+dictChecks :: TCState -> [(SLoc, Ident, [Level])]
+dictChecks = ssDictChecks . stage
+stagedNodes :: TCState -> Bool
+stagedNodes = ssStagedNodes . stage
+levelFixes :: TCState -> Int
+levelFixes = ssLevelFixes . stage
+
+modifyStage :: (StageState -> StageState) -> T ()
+modifyStage f = modify $ \ ts -> ts{ stage = f (stage ts) }
 
 type LevelTable = M.Map Level           -- stage of value identifiers; LPoly means any stage
 
@@ -261,7 +289,7 @@ type TRef = Int
 -- Levels (stages)
 
 putCurLevel :: Level -> T ()
-putCurLevel l = modify $ \ ts -> ts{ curLevel = l }
+putCurLevel l = modifyStage $ \ ss -> ss{ ssCurLevel = l }
 
 -- Run an action with a given current stage.
 withLevel :: forall a . Level -> T a -> T a
@@ -284,7 +312,7 @@ derefLevel l@(LVar n) = do
     Just l' -> do
       l'' <- derefLevel l'
       when (l'' /= l') $   -- path compression
-        modify $ \ ts -> ts{ levelSubst = IM.insert n l'' (levelSubst ts) }
+        modifyStage $ \ ss -> ss{ ssLevelSubst = IM.insert n l'' (ssLevelSubst ss) }
       return l''
 derefLevel l = return l
 
@@ -295,8 +323,8 @@ unifyLevelM a b = do
   b' <- derefLevel b
   case (a', b') of
     _ | a' == b' -> return True
-    (LVar n, _) -> do { modify $ \ ts -> ts{ levelSubst = IM.insert n b' (levelSubst ts), levelFixes = levelFixes ts + 1 }; return True }
-    (_, LVar n) -> do { modify $ \ ts -> ts{ levelSubst = IM.insert n a' (levelSubst ts), levelFixes = levelFixes ts + 1 }; return True }
+    (LVar n, _) -> do { modifyStage $ \ ss -> ss{ ssLevelSubst = IM.insert n b' (ssLevelSubst ss), ssLevelFixes = ssLevelFixes ss + 1 }; return True }
+    (_, LVar n) -> do { modifyStage $ \ ss -> ss{ ssLevelSubst = IM.insert n a' (ssLevelSubst ss), ssLevelFixes = ssLevelFixes ss + 1 }; return True }
     (LPoly, _) -> return True     -- should not happen, but be lenient
     (_, LPoly) -> return True
     _ -> return False
@@ -326,37 +354,36 @@ lookupLevel i = do
     Nothing -> lookupLevelTable i
 
 addLocalLevel :: Ident -> Level -> T ()
-addLocalLevel i l = modify $ \ ts -> ts{ localLevels = M.insert i l (localLevels ts) }
+addLocalLevel i l = modifyStage $ \ ss -> ss{ ssLocalLevels = M.insert i l (ssLocalLevels ss) }
 
 putLocalLevels :: LevelTable -> T ()
-putLocalLevels lt = modify $ \ ts -> ts{ localLevels = lt }
+putLocalLevels lt = modifyStage $ \ ss -> ss{ ssLocalLevels = lt }
 
 addLevelTable :: Ident -> Level -> T ()
-addLevelTable i l = modify $ \ ts -> ts{ levelTable = M.insert i l (levelTable ts) }
+addLevelTable i l = modifyStage $ \ ss -> ss{ ssLevelTable = M.insert i l (ssLevelTable ss) }
 
 putLevelTable :: LevelTable -> T ()
-putLevelTable lt = modify $ \ ts -> ts{ levelTable = lt }
+putLevelTable lt = modifyStage $ \ ss -> ss{ ssLevelTable = lt }
 
 lookupTypeLevel :: Ident -> T (Maybe LevelSig)
 lookupTypeLevel i = gets (M.lookup i . typeLevels)
 
 addTypeLevel :: Ident -> LevelSig -> T ()
-addTypeLevel i s = modify $ \ ts -> ts{ typeLevels = M.insert i s (typeLevels ts) }
+addTypeLevel i s = modifyStage $ \ ss -> ss{ ssTypeLevels = M.insert i s (ssTypeLevels ss) }
 
 -- Record that dictionary d is used at the current stage.
 addDictUse :: Ident -> T ()
 addDictUse d = do
-  l <- gets curLevel
-  modify $ \ ts -> ts{ dictUses = M.insertWith (++) d [l] (dictUses ts) }
+  modifyStage $ \ ss -> ss{ ssDictUses = M.insertWith (++) d [ssCurLevel ss] (ssDictUses ss) }
 
 addDictUses :: Ident -> [Level] -> T ()
-addDictUses d ls = modify $ \ ts -> ts{ dictUses = M.insertWith (++) d ls (dictUses ts) }
+addDictUses d ls = modifyStage $ \ ss -> ss{ ssDictUses = M.insertWith (++) d ls (ssDictUses ss) }
 
 getDictUses :: Ident -> T [Level]
 getDictUses d = gets (fromMaybe [] . M.lookup d . dictUses)
 
 addDictCheck :: SLoc -> Ident -> [Level] -> T ()
-addDictCheck loc d ls = modify $ \ ts -> ts{ dictChecks = (loc, d, ls) : dictChecks ts }
+addDictCheck loc d ls = modifyStage $ \ ss -> ss{ ssDictChecks = (loc, d, ls) : ssDictChecks ss }
 
 newUniq :: T TRef
 newUniq = do

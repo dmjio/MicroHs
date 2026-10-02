@@ -343,15 +343,17 @@ mkTCState mdlName globs mdls =
           ctxTables = (gInstInfo globs, [], [], []),
           constraints = [],
           defaults = dflts,
-          curLevel = LObj,
-          levelSubst = IM.empty,
-          levelTable = gLevels globs,
-          localLevels = M.empty,
-          typeLevels = gTypeLevels globs,
-          dictUses = M.empty,
-          dictChecks = [],
-          stagedNodes = False,
-          levelFixes = 0
+          stage = StageState {
+            ssCurLevel = LObj,
+            ssLevelSubst = IM.empty,
+            ssLevelTable = gLevels globs,
+            ssLocalLevels = M.empty,
+            ssTypeLevels = gTypeLevels globs,
+            ssDictUses = M.empty,
+            ssDictChecks = [],
+            ssStagedNodes = False,
+            ssLevelFixes = 0
+            }
         }
 
 mergeDefaults :: Defaults -> Defaults -> Defaults
@@ -888,8 +890,9 @@ extValE :: HasCallStack =>
            Ident -> EType -> Expr -> T ()
 extValE i t e =
   -- local variables are bound at the current stage
-  modify $ \ ts -> ts{ valueTable = stInsertLcl i (Entry e t) (valueTable ts),
-                      localLevels = M.insert i (curLevel ts) (localLevels ts) }
+  modify $ \ ts -> let ss = stage ts in
+                   ts{ valueTable = stInsertLcl i (Entry e t) (valueTable ts),
+                       stage = ss{ ssLocalLevels = M.insert i (ssCurLevel ss) (ssLocalLevels ss) } }
 
 -- Extend the global symbol table with i = e :: t
 -- Add both qualified and unqualified versions of i.
@@ -957,7 +960,7 @@ withExtVal i t ta = do
   lenv <- gets localLevels
   extVal i t
   a <- ta
-  modify $ \ ts -> ts{ valueTable = venv, localLevels = lenv }
+  modify $ \ ts -> ts{ valueTable = venv, stage = (stage ts){ ssLocalLevels = lenv } }
   return a
 
 withExtVals :: forall a . HasCallStack =>
@@ -967,7 +970,7 @@ withExtVals env ta = do
   lenv <- gets localLevels
   extVals env
   a <- ta
-  modify $ \ ts -> ts{ valueTable = venv, localLevels = lenv }
+  modify $ \ ts -> ts{ valueTable = venv, stage = (stage ts){ ssLocalLevels = lenv } }
   return a
 
 withExtTyps :: forall a . [IdKind] -> T a -> T a
@@ -1723,7 +1726,7 @@ tcDefValue adef =
       l <- defLevel i
       withLevel l $ do
         tcTypeLevelSig (getSLoc i) l t     -- the type must be consistent with the stage
-        modify $ \ ts -> ts{ stagedNodes = False }
+        modifyStage $ \ ss -> ss{ ssStagedNodes = False }
         teqns <- tcEqns True t eqns
         checkConstraints
         sn <- gets stagedNodes
@@ -4247,34 +4250,31 @@ sameLevel a b = do
 -- Make a stage adjustment marker, see zonkStage.
 mkStaged :: Level -> Level -> Maybe EType -> Expr -> T Expr
 mkStaged l1 l2 mt e = do
-  modify $ \ ts -> ts{ stagedNodes = True }
+  modifyStage $ \ ss -> ss{ ssStagedNodes = True }
   return (EStaged l1 l2 mt e)
 
 -- Check that the variable (as found in the symbol table) can be used at the current stage.
 useLevelE :: SLoc -> Expr -> EType -> T ()
 useLevelE loc e t = do
-  tcm <- gets tcMode
-  when (tcm == TCExpr) $ do
-    cur <- gets curLevel
-    let i = exprIdent e
-    mll <- gets (M.lookup i . localLevels)
-    ml <- case mll of
-            Just _ -> return mll
-            Nothing -> do
-              mg <- lookupLevelTable i
-              case mg of
-                -- A global definition that has not been checked yet: its stage is unknown.
-                -- Uses do not constrain it (it might be stage polymorphic), so defer the check.
-                Just (LVar _) -> do { addDictCheck loc i [cur]; return (Just LPoly) }
-                _ -> return mg
-    case ml of
-      Just LPoly -> return ()
+  ts <- get
+  when (tcMode ts == TCExpr) $ do
+    let ss = stage ts
+        cur = ssCurLevel ss
+        i = exprIdent e
+    case M.lookup i (ssLocalLevels ss) of
       Just l -> unifyLevel loc (showIdent i) l cur
       Nothing ->
-        -- Not in the table, so the stage is determined by the type.
-        case t of
-          EUVar _ -> return ()
-          _ -> tcTypeLevelSig loc cur t
+        case M.lookup i (ssLevelTable ss) of
+          Just LPoly -> return ()
+          -- A global definition that has not been checked yet: its stage is unknown.
+          -- Uses do not constrain it (it might be stage polymorphic), so defer the check.
+          Just (LVar _) -> addDictCheck loc i [cur]
+          Just l -> unifyLevel loc (showIdent i) l cur
+          Nothing ->
+            -- Not in the table, so the stage is determined by the type.
+            case t of
+              EUVar _ -> return ()
+              _ -> tcTypeLevelSig loc cur t
 
 -- Add the stage of a constructor (or method) of the type (class) tycon.
 addConLevel :: Ident -> Ident -> T ()
@@ -4323,7 +4323,7 @@ defLevel i = do
 checkDeferredLevels :: T ()
 checkDeferredLevels = do
   cks <- gets dictChecks
-  modify $ \ ts -> ts{ dictChecks = [] }
+  modifyStage $ \ ss -> ss{ ssDictChecks = [] }
   let loop = do
         n0 <- gets levelFixes
         forM_ cks $ \ (loc, d, uses) -> do
@@ -4356,7 +4356,7 @@ finalizeLevels = do
   lt' <- mapM (\ (i, l) -> (,) i <$> gen l) [ (i, l) | (i, l) <- M.toList lt, mine i, isLVar l ]
   putLevelTable (foldr (uncurry M.insert) lt lt')
   -- Reset the per module state.
-  modify $ \ ts -> ts{ levelSubst = IM.empty, localLevels = M.empty, dictUses = M.empty, dictChecks = [], curLevel = LObj }
+  modifyStage $ \ ss -> ss{ ssLevelSubst = IM.empty, ssLocalLevels = M.empty, ssDictUses = M.empty, ssDictChecks = [], ssCurLevel = LObj }
  where isLVar (LVar _) = True
        isLVar _ = False
 
