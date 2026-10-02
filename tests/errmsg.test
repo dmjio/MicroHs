@@ -227,4 +227,20 @@ x = 0xffff_
 "../tmp/E.hs": line 3, col 11: _ cannot be used as a variable
 
 =====
+module E() where
+import Staged
+f :: Int -> Code Int
+f x = [| x |]
+-----
+"../tmp/E.hs": line 4, col 10: stage mismatch: x is meta level, but is used at object level
+
+=====
+module E() where
+import Staged
+g :: Code Int -> Code (Code Int)
+g c = [| [| 1 |] |]
+-----
+"../tmp/E.hs": line 4, col 1: stage mismatch: the type Code Int is meta level, but is used at object level
+
+=====
 END

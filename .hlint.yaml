@@ -86,6 +86,8 @@
     - --ignore-glob=lib/Staged.hs
     - --ignore-glob=tests/Staged1.hs
     - --ignore-glob=tests/Staged2.hs
+    - --ignore-glob=tests/Staged3.hs
+    - --ignore-glob=tests/StagedLib.hs
     - --ignore-glob=tests/Fix.hs
     - --ignore-glob=tests/Unboxed.hs
     - --ignore-glob=tests/HashOper.hs
