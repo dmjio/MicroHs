@@ -58,6 +58,8 @@ test:
 	$(TMHS) IOArray    && $(EVAL) > IOArray.out    && diff IOArray.ref IOArray.out
 	$(TMHS) ST         && $(EVAL) > ST.out         && diff ST.ref ST.out
 	$(TMHS) HigherKind && $(EVAL) > HigherKind.out && diff HigherKind.ref HigherKind.out
+	$(TMHS) Staged1    && $(EVAL) > Staged1.out    && diff Staged1.ref Staged1.out
+	$(TMHS) Staged2    && $(EVAL) > Staged2.out    && diff Staged2.ref Staged2.out
 	$(TMHS) PolyKind   && $(EVAL) > PolyKind.out   && diff PolyKind.ref PolyKind.out
 	$(TMHS) Record     && $(EVAL) > Record.out     && diff Record.ref Record.out
 	$(TMHS) Deriving   && $(EVAL) > Deriving.out   && diff Deriving.ref Deriving.out

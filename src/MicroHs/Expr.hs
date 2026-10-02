@@ -8,6 +8,7 @@ module MicroHs.Expr(
   EDef(..), showEDefs,
   Deriving(..), DerStrategy(..), doNotDerive,
   Expr(..), eLam, eLamWithSLoc, eEqn, oneAlt, eEqns, showExpr, eqExpr,
+  Level(..), showLevel,
   XTCState,
   CallConv(..),
   QForm(..),
@@ -201,6 +202,12 @@ data Expr
   | EUpdate Expr [EField]
   | ESelect [Ident]
   | ETypeArg EType           -- @type
+  -- two-level type theory (staging)
+  | EQuote Expr              -- [| e |]   quote object-level code,  e :: a  ==>  [| e |] :: Code a
+  | ESplice Expr             -- ~e        splice meta-level code,   e :: Code a  ==>  ~e :: a
+  -- only while type checking: adjust the stage of e from the first level to the second.
+  -- The optional type is the type of e, needed when the adjustment has to be a splice.
+  | EStaged Level Level (Maybe EType) Expr
   -- only in patterns
   | EAt Ident EPat
   | EViewPat Expr EPat
@@ -237,6 +244,9 @@ instance NFData Expr where
   rnf (EUpdate a b) = rnf a `seq` rnf b
   rnf (ESelect a) = rnf a
   rnf (ETypeArg a) = rnf a
+  rnf (EQuote a) = rnf a
+  rnf (ESplice a) = rnf a
+  rnf (EStaged a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
   rnf (EAt a b) = rnf a `seq` rnf b
   rnf (EViewPat a b) = rnf a `seq` rnf b
   rnf (ELazy a b) = rnf a `seq` rnf b
@@ -248,6 +258,23 @@ instance NFData Expr where
 
 data QForm = QImpl | QExpl | QReqd
   deriving (Show)
+
+-- The stage (level) of a term or type in the two-level type theory.
+--   LMeta   compile time (stage 1 in the 2LTT paper)
+--   LObj    run time (stage 0)
+--   LVar n  a level unification variable (only during type checking)
+--   LPoly   level polymorphic (only in symbol tables)
+data Level = LMeta | LObj | LVar Int | LPoly
+  deriving (Show, Eq)
+
+instance NFData Level where
+  rnf l = seq l ()
+
+showLevel :: Level -> String
+showLevel LMeta = "meta"
+showLevel LObj = "object"
+showLevel (LVar n) = "_l" ++ show n
+showLevel LPoly = "any"
 
 instance NFData QForm where
   rnf q = seq q ()
@@ -608,6 +635,9 @@ instance HasLoc Expr where
   getSLoc (EUpdate e _) = getSLoc e
   getSLoc (ESelect is) = getSLoc is
   getSLoc (ETypeArg t) = getSLoc t
+  getSLoc (EQuote e) = getSLoc e
+  getSLoc (ESplice e) = getSLoc e
+  getSLoc (EStaged _ _ _ e) = getSLoc e
   getSLoc (EAt i _) = getSLoc i
   getSLoc (EViewPat e _) = getSLoc e
   getSLoc (ELazy _ e) = getSLoc e
@@ -784,6 +814,9 @@ allVarsExpr' aexpr =
     EUpdate e ies -> allVarsExpr' e . composeMap field ies
     ESelect _ -> id
     ETypeArg _ -> id
+    EQuote e -> allVarsExpr' e
+    ESplice e -> allVarsExpr' e
+    EStaged _ _ _ e -> allVarsExpr' e
     EAt i e -> (i :) . allVarsExpr' e
     EViewPat e p -> allVarsExpr' e . allVarsExpr' p
     ELazy _ p -> allVarsExpr' p
@@ -1024,6 +1057,9 @@ instance Pretty Expr where
         EUpdate ee ies -> ppE 12 ee <> text "{" <+> hsep (punctuate (text ",") (map (ppField l) ies)) <+> text "}"
         ESelect is -> maybeParens (prec > appPrec) $ hcat $ map (\ i -> text "." <> pPrint0 l i) is
         ETypeArg t -> text "@" <> ppE appPrec t
+        EQuote e -> text "[|" <+> ppE 0 e <+> text "|]"
+        ESplice e -> text "~" <> ppE (appPrec + 1) e
+        EStaged l1 l2 _ e -> text ("{" ++ showLevel l1 ++ "->" ++ showLevel l2 ++ "}") <> ppE (appPrec + 1) e
         EAt i e -> pPrint0 l i <> text "@" <> ppE appPrec e
         EViewPat e p -> parens $ ppE appPrec e <+> text "->" <+> ppE appPrec p
         ELazy True p -> text "~" <> ppE appPrec p

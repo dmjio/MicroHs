@@ -4,11 +4,11 @@
 module MicroHs.TypeCheck(
   typeCheck,
   TModule(..), showTModule,
-  GlobTables, emptyGlobTables, mergeGlobTables,
+  GlobTables(..), emptyGlobTables, mergeGlobTables,
   impossible, impossibleShow,
   mkClassConstructor,
   mkSuperSel,
-  setBindings,
+  setBindings, setMetaDefs,
   boolPrefix,
   listPrefix,
   ValueExport(..), TypeExport(..),
@@ -26,6 +26,7 @@ import Data.List
 import Data.Maybe
 import MicroHs.Builtin
 import MicroHs.Deriving
+import MicroHs.Exp(Exp)
 import MicroHs.Expr
 import MicroHs.Fixity
 import MicroHs.Flags
@@ -58,14 +59,17 @@ data GlobTables = GlobTables {
   gSynTable   :: SynTable,        -- type synonyms are needed for expansion
   gDataTable  :: DataTable,       -- data/newtype definitions
   gClassTable :: ClassTable,      -- classes are needed for superclass expansion etc
-  gInstInfo   :: InstTable        -- instances are implicitely global
+  gInstInfo   :: InstTable,       -- instances are implicitely global
+  gLevels     :: LevelTable,      -- stage (meta/object/any) of global values
+  gTypeLevels :: TypeLevelTable   -- stage signatures of type constructors and classes
   }
 
 instance NFData GlobTables where
-  rnf (GlobTables a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
+  rnf (GlobTables a b c d e f) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e `seq` rnf f
 
 emptyGlobTables :: GlobTables
-emptyGlobTables = GlobTables { gSynTable = M.empty, gDataTable = M.fromList dataTuples, gClassTable = M.empty, gInstInfo = M.empty }
+emptyGlobTables = GlobTables { gSynTable = M.empty, gDataTable = M.fromList dataTuples, gClassTable = M.empty, gInstInfo = M.empty,
+                               gLevels = primLevels, gTypeLevels = primTypeLevels }
   -- XXX Could fill the initial symbol table from this
   where dataTuples :: [(Ident, EDef)]
         dataTuples = [ (con, Data (con, map (\ v -> IdKind v eDummy) vs) [Constr [] [] con False (Left $ map (\v-> (False, EVar v)) vs)] [])
@@ -78,7 +82,9 @@ mergeGlobTables g1 g2 =
   GlobTables { gSynTable = M.merge (gSynTable g1) (gSynTable g2),
                gDataTable = M.merge (gDataTable g1) (gDataTable g2),
                gClassTable = M.merge (gClassTable g1) (gClassTable g2),
-               gInstInfo = M.mergeWith mergeInstInfo (gInstInfo g1) (gInstInfo g2) }
+               gInstInfo = M.mergeWith mergeInstInfo (gInstInfo g1) (gInstInfo g2),
+               gLevels = M.merge (gLevels g1) (gLevels g2),
+               gTypeLevels = M.merge (gTypeLevels g1) (gTypeLevels g2) }
 
 type Symbols = (SymTab, SymTab)
 
@@ -88,15 +94,19 @@ data TModule a = TModule {
   tTypeExps   :: [TypeExport],    -- exported types
   tValueExps  :: [ValueExport],   -- exported values (including from T(..))
   tDefaults   :: Defaults,        -- exported defaults
-  tBindingsOf :: a                -- bindings
+  tBindingsOf :: a,               -- bindings
+  tMetaDefs   :: [(Ident, Exp)]   -- meta level (compile time only) definitions, kept for staging importers
   }
 --  deriving (Show)
 
 instance NFData a => NFData (TModule a) where
-  rnf (TModule a b c d e f) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e `seq` rnf f
+  rnf (TModule a b c d e f g) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d `seq` rnf e `seq` rnf f `seq` rnf g
 
 setBindings :: TModule b -> a -> TModule a
-setBindings (TModule x y z w v _) a = TModule x y z w v a
+setBindings (TModule x y z w v _ m) a = TModule x y z w v a m
+
+setMetaDefs :: TModule a -> [(Ident, Exp)] -> TModule a
+setMetaDefs (TModule x y z w v a _) m = TModule x y z w v a m
 
 type FixDef = (Ident, Fixity)
 
@@ -129,7 +139,8 @@ typeCheck flags globs impt aimps (EModule mn exps defs) =
            dflts = M.fromList $ filter ((`elem` ds) . fst) $ M.toList $ defaults tcs
                  where ds = [ tyQIdent $ expLookup ti (typeTable tcs) | ExpDefault ti <- exps ]
          in  ( tModule mn (nubBy ((==) `on` fst) (concat fexps)) (concat texps) (concat vexps) dflts tds
-             , GlobTables { gSynTable = sexps, gDataTable = dexps, gClassTable = ctbl, gInstInfo = iexps }
+             , GlobTables { gSynTable = sexps, gDataTable = dexps, gClassTable = ctbl, gInstInfo = iexps,
+                            gLevels = levelTable tcs, gTypeLevels = typeLevels tcs }
              , (typeTable tcs, valueTable tcs)
              , tcs
              )
@@ -140,7 +151,7 @@ tModule :: IdentModule -> [FixDef] -> [TypeExport] -> [ValueExport] -> Defaults 
            TModule [EDef]
 tModule mn fs ts vs ds bs =
 --  trace ("tmodule " ++ showIdent mn ++ ":\n" ++ show vs) $
-  tseq ts `seq` vseq vs `seq` ds `seq` TModule mn fs ts vs ds bs
+  tseq ts `seq` vseq vs `seq` ds `seq` TModule mn fs ts vs ds bs []
   where
     tseq [] = ()
     tseq (TypeExport _ e _:xs) = e `seq` tseq xs
@@ -149,7 +160,7 @@ tModule mn fs ts vs ds bs =
 
 filterImports :: forall a . (ImportSpec, TModule a) -> (ImportSpec, TModule a)
 filterImports it@(ImportSpec _ _ _ _ Nothing, _) = it
-filterImports (imp@(ImportSpec _ _ _ _ (Just (hide, is))), TModule mn fx ts vs ds a) =
+filterImports (imp@(ImportSpec _ _ _ _ (Just (hide, is))), TModule mn fx ts vs ds a m) =
   let
     keep x xs = elem x xs /= hide
     ivs  = [ i | ImpValue i <- is ]
@@ -182,7 +193,7 @@ filterImports (imp@(ImportSpec _ _ _ _ (Just (hide, is))), TModule mn fx ts vs d
      else
        checkBad (ivs \\ allVs) .
        checkBad (its \\ allTs))
-    (imp, TModule mn fx ts' vs' ds a)
+    (imp, TModule mn fx ts' vs' ds a m)
 
 checkBad :: forall a . [Ident] -> a -> a
 checkBad [] a = a
@@ -196,7 +207,7 @@ getTVExps impMap _ _ _ (ExpModule m) =
   -- Export all modules with name m
   case M.lookup m impMap of
     Just ms ->
-      case unzip [ (te, ve) | TModule _ _ te ve _ _ <- ms ] of
+      case unzip [ (te, ve) | TModule _ _ te ve _ _ _ <- ms ] of
         (tes, ves) -> (concat tes, concat ves)
     _ -> errorMessage (getSLoc m) $ "undefined module: " ++ showIdent m
 getTVExps _ tys vals ast (ExpTypeSome ti is) =
@@ -269,7 +280,7 @@ mkTModule tds tcs =
     -- All defaults
     des = defaults tcs
 
-  in  TModule mn fes tes ves des impossible
+  in  TModule mn fes tes ves des impossible []
 
 -- Find all value Entry for names associated with a type.
 -- XXX join stLookup code with tentry
@@ -282,11 +293,11 @@ mkTCState mdlName globs mdls =
     allValues :: ValueTable
     allValues =
       let
-        usyms (ImportSpec _ qual _ _ _, TModule _ _ tes ves _ _) =
+        usyms (ImportSpec _ qual _ _ _, TModule _ _ tes ves _ _ _) =
           if qual then [] else
           [ (i, [e]) | ValueExport i e    <- ves, not (isInstId i)  ] ++
           [ (i, [e]) | TypeExport  _ _ cs <- tes, ValueExport i e <- cs, not (isDefaultMethodId i) ]
-        qsyms (ImportSpec _ _ _ mas _, TModule mn _ tes ves _ _) =
+        qsyms (ImportSpec _ _ _ mas _, TModule mn _ tes ves _ _ _) =
           let m = fromMaybe mn mas in
           [ (v, [e]) | ValueExport i e    <- ves,                        let { v = qualIdent    m i } ] ++
           [ (v, [e]) | TypeExport  _ _ cs <- tes, ValueExport i e <- cs, let { v = qualIdentD e m i } ] ++
@@ -301,9 +312,9 @@ mkTCState mdlName globs mdls =
     allTypes :: TypeTable
     allTypes =
       let
-        usyms (ImportSpec _ qual _ _ _, TModule _ _ tes _ _ _) =
+        usyms (ImportSpec _ qual _ _ _, TModule _ _ tes _ _ _ _) =
           if qual then [] else [ (i, [e]) | TypeExport i e _ <- tes, not (isHiddenIdent i) ]
-        qsyms (ImportSpec _ _ _ mas _, TModule mn _ tes _ _ _) =
+        qsyms (ImportSpec _ _ _ mas _, TModule mn _ tes _ _ _ _) =
           let m = fromMaybe mn mas in
           [ (qualIdent m i, [e]) | TypeExport i e _ <- tes, not (isHiddenIdent i) ]
       in stFromList (concatMap usyms mdls) (concatMap qsyms mdls)
@@ -312,7 +323,7 @@ mkTCState mdlName globs mdls =
     allFixes = M.fromList (concatMap (tFixDefs . snd) mdls)
     allAssocs :: AssocTable
     allAssocs =
-      let assocs (_, TModule _ _ tes _ _ _) = [ (tyQIdent e, cs) | TypeExport _ e cs <- tes ]
+      let assocs (_, TModule _ _ tes _ _ _ _) = [ (tyQIdent e, cs) | TypeExport _ e cs <- tes ]
           eqVE (ValueExport _ (Entry e1 _)) (ValueExport _ (Entry e2 _)) = eqEType e1 e2
       in  M.fromListWith (unionBy eqVE) $ concatMap assocs mdls
 
@@ -331,7 +342,16 @@ mkTCState mdlName globs mdls =
           classTable = gClassTable globs,
           ctxTables = (gInstInfo globs, [], [], []),
           constraints = [],
-          defaults = dflts
+          defaults = dflts,
+          curLevel = LObj,
+          levelSubst = IM.empty,
+          levelTable = gLevels globs,
+          localLevels = M.empty,
+          typeLevels = gTypeLevels globs,
+          dictUses = M.empty,
+          dictChecks = [],
+          stagedNodes = False,
+          levelFixes = 0
         }
 
 mergeDefaults :: Defaults -> Defaults -> Defaults
@@ -429,11 +449,13 @@ newDict loc ctx = do
   case find (\ (_, c) -> eqEType c ctx') cs of
     Just (i, _) -> do
 --      traceM ("newDict reuse: " ++ show (i, ctx'))
+      addDictUse i
       return (EVar i)
     _ -> do
       i <- newDictIdent loc
 --      traceM ("newDict: " ++ show (i, ctx', length cs))
       addConstraint i ctx'
+      addDictUse i
       return (EVar i)
 
 addConstraint :: Ident -> EConstraint -> T ()
@@ -463,6 +485,7 @@ withDict i c ta = do
 
 addDict :: HasCallStack => (Ident, EConstraint) -> T ()
 addDict (i, c) = do
+  gets curLevel >>= addLocalLevel i      -- the dictionary argument lives at the current stage
   c' <- derefUVar c
   if null (metaTvs [c']) then
     addInstDict i c'
@@ -863,9 +886,10 @@ tInst' t = return t
 
 extValE :: HasCallStack =>
            Ident -> EType -> Expr -> T ()
-extValE i t e = do
-  venv <- gets valueTable
-  putValueTable (stInsertLcl i (Entry e t) venv)
+extValE i t e =
+  -- local variables are bound at the current stage
+  modify $ \ ts -> ts{ valueTable = stInsertLcl i (Entry e t) (valueTable ts),
+                      localLevels = M.insert i (curLevel ts) (localLevels ts) }
 
 -- Extend the global symbol table with i = e :: t
 -- Add both qualified and unqualified versions of i.
@@ -930,18 +954,20 @@ withExtVal :: forall a . HasCallStack =>
               Ident -> EType -> T a -> T a
 withExtVal i t ta = do
   venv <- gets valueTable
+  lenv <- gets localLevels
   extVal i t
   a <- ta
-  putValueTable venv
+  modify $ \ ts -> ts{ valueTable = venv, localLevels = lenv }
   return a
 
 withExtVals :: forall a . HasCallStack =>
                [(Ident, EType)] -> T a -> T a
 withExtVals env ta = do
   venv <- gets valueTable
+  lenv <- gets localLevels
   extVals env
   a <- ta
-  putValueTable venv
+  modify $ \ ts -> ts{ valueTable = venv, localLevels = lenv }
   return a
 
 withExtTyps :: forall a . [IdKind] -> T a -> T a
@@ -968,11 +994,20 @@ tcDefs flags impt ds = do
   dst <- tcDefsType ds                                -- kind check type definitions
 --  tcTrace ("tcDefs 2:\n" ++ showEDefs dst)
   mapM_ addTypeAndData dst                            -- add typedefinitions to the symbol table
+  addTypeLevels dst                                   -- compute the stage signatures of types and classes
   dste <- tcExpandClassInst flags impt dst            -- expand class&instance, do deriving
 --  tcTrace ("tcDefs 3:\n" ++ showEDefs dste)
   setDefault dste                                     -- set current defaults
   dste' <- tcDefsValue dste                           -- type check all value definitions
   mapM_ addAssocs dste'
+  finalizeLevels                                      -- make the stage table exportable
+  dumpIf flags Dstage $ do
+    mn <- gets moduleName
+    lt <- gets levelTable
+    let pre = unIdent mn ++ "."
+        ls = [ showIdent i ++ " :: " ++ showLevel l | (i, l) <- M.toList lt, pre `isPrefixOf` unIdent i, l /= LPoly ]
+    unless (null ls) $
+      tcTrace' $ "stages " ++ showIdent mn ++ ":\n" ++ unlines ls
 
   case impt of
     ImpNormal -> do
@@ -1492,6 +1527,7 @@ tcDefsValue adefs = do
   -- Definitions with no type signature will be missing.
   mapM_ addValueType adefs
   defs <- concat<$> mapM (dsPatBind <=< dsEFieldsBind) adefs
+  mapM_ addDefLevel defs                 -- invent a stage variable for each definition
   let sccs = fst $ sccDefs defs
       tcSCC (AcyclicSCC d@Pattern{}) = tcPatSyn d
       tcSCC (AcyclicSCC d) = tInferDefs [d]
@@ -1506,6 +1542,8 @@ tcDefsValue adefs = do
 --  tcTrace $ "tcDefsValue: ------------ check"
   --  type check all definitions (the inferred ones will be rechecked)
   defs'' <- mapM (\ d -> do { tcReset; tcDefValue d}) defs'
+  -- Resolve the stages of the definitions, see checkDeferredLevels.
+  checkDeferredLevels
   let defs''' = concat signDefs ++ defs''
 --  traceM $ "tcDefsValue: ------------ done"
 --  traceM $ showEDefs defs'''
@@ -1547,9 +1585,11 @@ tInferDefs fcns = do
   --tcTrace $ "tInferDefs: " ++ show (map fst xts)
   -- Temporarily extend the local environment with the type variables
   withExtVals xts $ do
+    -- The local entries must have the stage of the global definition.
+    mapM_ (\ (i, _) -> defLevel i >>= addLocalLevel i) xts
     -- Infer types for all the Fcns, ignore the new bodies.
     -- The bodies will be re-typecked in tcDefsValues.
-    let tc (Fcn _ eqns) (_, t)   = do tcEqns False t eqns; return ()
+    let tc (Fcn i eqns) (_, t)   = do l <- defLevel i; withLevel l (tcEqns False t eqns); return ()
         tc (Pattern (i,_) _ _) _ = tcError (getSLoc i) "Cannot infer recursive pattern synonym types"
         tc _ _ = impossible
     zipWithM_ tc fcns xts
@@ -1609,6 +1649,7 @@ addValueType adef = do
               cty = EForall QExpl vks $ EForall QExpl evks $ addConstraints ectx $ foldr (tArrow . snd) tret ts
               fs = either (const []) (map fst) ets
           extValETop c cty (ECon $ ConData cti (qualIdent mn c) fs)
+          addConLevel tycon c
       mapM_ addCon cs
       mapM_ (addConFields tycon) cs
     Newtype (tycon, vks) con@(Constr _ _ c _ ets) _ -> do
@@ -1617,6 +1658,7 @@ addValueType adef = do
         tret = tApps (qualIdent mn tycon) (map tVarK vks)
         fs = either (const []) (map fst) ets
       extValETop c (EForall QExpl vks $ EForall QExpl [] $ tArrow t tret) (ECon $ ConNew (qualIdent mn c) fs)
+      addConLevel tycon c
       addConFields tycon con
     ForImp _ _ i t -> extValQTop i t
     Class ctx (i, vks) fds ms -> addValueClass ctx i vks fds ms
@@ -1652,8 +1694,11 @@ addValueClass ctx iCls vks fds ms = do
       iConTy = EForall QExpl vks $ foldr tArrow tret targs
       tvs = map (EVar . idKindIdent) vks
       methIdTys' = map (\ (i, t) -> (i, EForall QExpl vks $ tApps qiCls tvs `tImplies` t)) methIdTys
-      addMethod (i, t) = extValETop i t (EVar $ qualIdent mn i)
+      addMethod (i, t) = do
+        extValETop i t (EVar $ qualIdent mn i)
+        addConLevel iCls i             -- methods have the stage of the class
   extValETop iCon iConTy (ECon $ ConData cti (qualIdent mn iCon) [])
+  addConLevel iCls iCon
   mapM_ addMethod methIdTys'
   -- Update class table, now with actual constructor type.
 --  traceM $ "addValueClass " ++ show (iCls, vks)
@@ -1675,20 +1720,16 @@ tcDefValue adef =
   case adef of
     Fcn i eqns -> do
       (_, t) <- tLookup "type signature" i
---      when (isConIdent i) $ do
---        tcTrace $ "tcDefValue: patsyn\n" ++ show i ++ " :: " ++ show t
---        tcTrace $ "tcDefValue:\n" ++ showEDefs [adef]
---      tcTrace $ "tcDefValue: ------- start " ++ showIdent i
---      tcTrace $ "tcDefValue: " ++ showIdent i ++ " :: " ++ showExpr t
---      tcTrace $ "tcDefValue: " ++ showEDefs [adef]
-      teqns <- tcEqns True t eqns
---      tcTrace ("tcDefValue: after\n" ++ showEDefs [adef, Fcn i teqns])
---      cs <- gets constraints
---      tcTrace $ "tcDefValue: constraints: " ++ show cs
-      checkConstraints
-      mn <- gets moduleName
---      tcTrace $ "tcDefValue: " ++ showIdent i ++ " done"
-      return $ Fcn (qualIdent' mn i) teqns
+      l <- defLevel i
+      withLevel l $ do
+        tcTypeLevelSig (getSLoc i) l t     -- the type must be consistent with the stage
+        modify $ \ ts -> ts{ stagedNodes = False }
+        teqns <- tcEqns True t eqns
+        checkConstraints
+        sn <- gets stagedNodes
+        teqns' <- if sn then zonkStageEqns teqns else return teqns   -- resolve the stage adjustments
+        mn <- gets moduleName
+        return $ Fcn (qualIdent' mn i) teqns'
     ForImp cc ie i t -> do
       mn <- gets moduleName
       t' <- withNewtypeAsSyns (expandSynLoc t)
@@ -1696,7 +1737,7 @@ tcDefValue adef =
     -- Check that a foreign export match the declaration type.
     -- In most cases the types will be the same, but the declaration can be overloaded
     -- so we need to ensure that it is compatible with the export definition.
-    ForExp cc ms e t -> do
+    ForExp cc ms e t -> withLevel LObj $ do
       ((e', t'), ds) <- solveAndDefault True $ tInferExpr (ESign e t)
       t'' <- withNewtypeAsSyns (expandSynLoc t')
       let e'' = eLetB (eBinds ds) e'
@@ -1884,8 +1925,10 @@ tcExprR mt ae =
                  EUVar r -> fmap (fromMaybe t) (getUVar r)
                  _ -> return t
 --             tcTrace $ "EVar: " ++ showIdent i ++ " :: " ++ showExpr t ++ " = " ++ showExpr t' ++ " mt=" ++ show mt
+             useLevelE loc e t'
              instSigma loc e t' mt
-    EQVar e t ->  -- already resolved, just instantiate
+    EQVar e t -> do  -- already resolved, just instantiate
+             useLevelE loc e t
              instSigma loc e t mt
 
     EApp f e ->
@@ -1968,11 +2011,48 @@ tcExprR mt ae =
         _ -> impossible
     ECase a arms -> do
       -- XXX should look more like EIf
-      (ea, ta) <- tInferExpr a
+      -- The scrutinee (and the patterns and guards) can be at a different stage
+      -- than the case expression itself.
+      cur <- gets curLevel
+      ls <- newLevelVar
+      (ea, ta) <- withLevel ls $ tInferExpr a
       tt <- tGetExpType mt
-      earms <- mapM (tcArm tt ta) arms
-      return (ECase ea earms)
-    ELet bs a -> tcBinds bs $ \ ebs -> do { ea <- tcExpr mt a; return (ELet ebs ea) }
+      same <- sameLevel ls cur
+      if same then do
+        earms <- mapM (tcArm cur cur tt ta) arms
+        return (ECase ea earms)
+       else do
+        earms <- mapM (tcArm ls cur tt ta) arms
+        mkStaged ls cur Nothing (ECase ea earms)
+    ELet bs a -> do
+      -- The bindings can be at a different stage than the body.
+      cur <- gets curLevel
+      tcBindsL bs $ \ lb ebs -> do
+        ea <- tcExpr mt a
+        same <- sameLevel lb cur
+        if same then
+          return (ELet ebs ea)
+         else do
+          t <- tGetExpType mt
+          mkStaged lb cur Nothing . ELet ebs =<< mkStaged cur lb (Just t) ea
+    EQuote e -> do
+      cur <- gets curLevel
+      unifyLevel loc "a quotation" LMeta cur
+      mc <- unCode mt
+      case mc of
+        Just ta -> do
+          e' <- withLevel LObj $ tCheckExpr ta e
+          return (EQuote e')
+        Nothing -> do
+          (e', ta) <- withLevel LObj $ tInferExpr e
+          munify loc mt (tCode loc ta)
+          return (EQuote e')
+    ESplice e -> do
+      cur <- gets curLevel
+      unifyLevel loc "a splice" LObj cur
+      t <- tGetExpType mt
+      e' <- withLevel LMeta $ tCheckExpr (tCode loc t) e
+      return (ESplice e')
     ETuple es ->
       case unTuple mt of
         Just ts | length ts == length es -> do
@@ -2020,19 +2100,27 @@ tcExprR mt ae =
     ESectL e i -> tcLSect e i >>= tcExpr mt
     ESectR i e -> tcRSect i e >>= tcExpr mt
     EIf e1 e2 e3 -> do
-      e1' <- tCheckExpr (tBool (getSLoc e1)) e1
+      -- The condition can be at a different stage than the branches.
+      cur <- gets curLevel
+      lc <- newLevelVar
+      e1' <- withLevel lc $ tCheckExpr (tBool (getSLoc e1)) e1
+      same <- sameLevel lc cur
+      let wrap t e | same = return e
+                   | otherwise = mkStaged cur lc (Just t) e
+          wrapIf e | same = return e
+                   | otherwise = mkStaged lc cur Nothing e
       case mt of
         Check t -> do
-          e2' <- checkSigma e2 t
-          e3' <- checkSigma e3 t
-          return (EIf e1' e2' e3')
+          e2' <- checkSigma e2 t >>= wrap t
+          e3' <- checkSigma e3 t >>= wrap t
+          wrapIf (EIf e1' e2' e3')
         Infer ref -> do
           (e2', t2) <- tInferExpr e2
           (e3', t3) <- tInferExpr e3
-          e2'' <- subsCheck loc e2' t2 t3
-          e3'' <- subsCheck loc e3' t3 t2
+          e2'' <- subsCheck loc e2' t2 t3 >>= wrap t2
+          e3'' <- subsCheck loc e3' t3 t2 >>= wrap t2
           tSetRefType loc ref t2
-          return (EIf e1' e2'' e3'')
+          wrapIf (EIf e1' e2'' e3'')
 
     -- Translate (if | a1; | a2 ...) into
     --           (case [] of _ | a1; | a2 ...)
@@ -2091,6 +2179,7 @@ tcExprR mt ae =
 -}
       -- XXX wrong for kind signatures
       t' <- withTypeTable $ tCheckTypeTImpl QImpl kType t >>= expandSyn
+      gets curLevel >>= \ cur -> tcTypeLevelSig loc cur t'
       case splitContext t' of
         -- No context, handle this without a 'let' to avoid bloat.
         ([], [], _) -> do
@@ -2236,6 +2325,7 @@ tcExprAp mt ae args = do
                  EUVar r -> fmap (fromMaybe t) (getUVar r)
                  _ -> return t
 --             tcTrace $ "exExprAp: EVar " ++ showIdent i ++ " :: " ++ showExpr t ++ " = " ++ showExpr t' ++ " mt=" ++ show mt
+             useLevelE (getSLoc i) fn t'
              case fn of
                EVar ii | ii == mkIdent "Data.Function.$", f:as <- args -> tcExprAp mt f as
                _ -> tcExprApFn mt fn t' args
@@ -2683,18 +2773,33 @@ tcPats at pps ta =
 
 
 tcAlts :: HasCallStack => EType -> EAlts -> T EAlts
-tcAlts t (EAlts alts bs) =
+tcAlts t alts = do
+  cur <- gets curLevel
+  tcAltsL cur t alts
+
+-- Check alternatives where the guards (and where bindings) are at the current stage,
+-- but the right hand sides are at stage l.
+tcAltsL :: HasCallStack => Level -> EType -> EAlts -> T EAlts
+-- A 'where' without guards is just a 'let', and a 'let' can change stage.
+tcAltsL l t (EAlts [([], rhs)] bs) | not (null bs) = tcAltsL l t (EAlts [([], ELet bs rhs)] [])
+tcAltsL l t (EAlts alts bs) =
 --  trace ("tcAlts: bs in " ++ showEBinds bs) $
   tcBinds bs $ \ bs' -> do
 --    tcTrace ("tcAlts: bs out " ++ showEBinds bbs)
-    alts' <- mapM (tcAlt t) alts
+    alts' <- mapM (tcAltL l t) alts
     return (EAlts alts' bs')
 
-tcAlt :: HasCallStack => EType -> EAlt -> T EAlt
+tcAltL :: HasCallStack => Level -> EType -> EAlt -> T EAlt
 --tcAlt t (_, rhs) | trace ("tcAlt: " ++ showExpr rhs ++ " :: " ++ showEType t) False = undefined
-tcAlt t (ss, rhs) = tcGuards ss $ \ ss' -> do
-  rhs' <- tCheckExprAndSolve t rhs
-  return (ss', rhs')
+tcAltL l t (ss, rhs) = tcGuards ss $ \ ss' -> do
+  cur <- gets curLevel
+  if l == cur then do
+    rhs' <- tCheckExprAndSolve t rhs
+    return (ss', rhs')
+   else do
+    rhs' <- withLevel l $ tCheckExprAndSolve t rhs
+    rhs'' <- mkStaged l cur (Just t) rhs'
+    return (ss', rhs'')
 
 tcGuards :: [EStmt] -> ([EStmt] -> T EAlt) -> T EAlt
 tcGuards [] ta = ta []
@@ -2714,13 +2819,17 @@ tcGuard (SThen e) ta = do
 tcGuard (SLet bs) ta = tcBinds bs $ \ bs' -> ta (SLet bs')
 tcGuard (SRec ss) _ = tcError (getSLoc ss) "rec not allowed"
 
-tcArm :: EType -> EType -> ECaseArm -> T ECaseArm
-tcArm t tpat arm =
+-- Check a case arm.  The pattern and guards are at stage ls, the right hand sides at stage l.
+tcArm :: Level -> Level -> EType -> EType -> ECaseArm -> T ECaseArm
+tcArm ls l t tpat arm =
   case arm of
     -- The dicts introduced by tCheckPatC are
     -- used in the tCheckExprAndSolve in tcAlt.
-    (p, alts) -> tCheckPatC tpat p $ \ pp -> do
-      alts' <- tcAlts t alts
+    (p, alts) | ls == l -> tCheckPatC tpat p $ \ pp -> do
+      alts' <- tcAltsL l t alts
+      return (pp, alts')
+    (p, alts) -> withLevel ls $ tCheckPatC tpat p $ \ pp -> do
+      alts' <- tcAltsL l t alts
       return (pp, alts')
 
 tCheckExprAndSolve :: HasCallStack => EType -> Expr -> T Expr
@@ -2962,24 +3071,45 @@ multCheck vs =
     let v = head vs
     tcError (getSLoc v) $ "Multiply defined: " ++ showIdent v
 
+-- Check bindings that are at the current stage.
 tcBinds :: HasCallStack =>
            [EBind] -> ([EBind] -> T a) -> T a
-tcBinds axbs ta =
+tcBinds axbs ta = do
+  cur <- gets curLevel
+  tcBindsL axbs $ \ lb bs -> do
+    unifyLevel (bindsLoc axbs) "a binding" lb cur
+    ta bs
+
+bindsLoc :: [EBind] -> SLoc
+bindsLoc bs =
+  case [ getSLoc i | Fcn i _ <- bs ] ++ [ getSLoc p | PatBind p _ <- bs ] of
+    l : _ -> l
+    [] -> noSLoc
+
+-- Check bindings that can be at any stage.
+-- The stage (variable) of the bindings is passed to the continuation.
+-- The continuation runs at the original stage.
+tcBindsL :: HasCallStack =>
+            [EBind] -> (Level -> [EBind] -> T a) -> T a
+tcBindsL axbs ta =
   withFixes [ (i, fx) | Infix fx is <- axbs, i <- is ] $ do
   xbs <- concat <$> mapM (dsPatBind <=< dsEFieldsBind) axbs
+  cur <- gets curLevel
+  lb <- newLevelVar
   let
     getSign (Sign is t) = do
       tt <- withTypeTable $ tCheckTypeTImpl QImpl kType t >>= expandSyn
+      tcTypeLevelSig (getSLoc t) lb tt
       return [(is, tt)]
     getSign _ = return []
   -- find and check all type signatures
   istss <- mapM getSign xbs
   multCheck $ getBindsVars xbs
   let (sccs, signs) = sccDefs xbs
-  withExtVals [ (i, t) | ists <- istss, (is, t) <- ists, i <- is ] $ do
+  withLevel lb $ withExtVals [ (i, t) | ists <- istss, (is, t) <- ists, i <- is ] $ do
     nbss <- mapM tcBindGrp sccs  -- Check a group of bindings, and extend symbol table
     nbs <- mapM tcBind signs     -- All types known, so check the bidings with signatures.
-    ta (concat (nbs : nbss))
+    withLevel cur $ ta lb (concat (nbs : nbss))
 
 tcBindGrp :: SCC EBind -> T [EBind]
 tcBindGrp (AcyclicSCC d) = tcBindGrp' [d]
@@ -3019,14 +3149,20 @@ tcBindGrp' bs = do
         return bs'
        else do
        -- Generalize
-       cs <- mapM (derefUVar . snd) =<< gets constraints
+       dcs <- mapM (\ (d, c) -> (,) d <$> derefUVar c) =<< gets constraints
        -- find constraints involving the local tyvars
-       let ctx = nubBy eqEType $
-                 filter (\ c -> not $ null $ intersect qvs' (metaTvs [c])) cs
+       let involved (_, c) = not $ null $ intersect qvs' (metaTvs [c])
+           ctx = nubBy eqEType $ map snd $ filter involved dcs
        let multiParam ct = length (snd (getApp ct)) /= 1
+       -- Two-level type theory: generalizing adds dictionary arguments at the stage of
+       -- the binding.  If a constraint arises at another stage (e.g. inside a quotation)
+       -- the dictionary cannot be passed, so stay monomorphic and let the use site solve it.
+       lb <- gets curLevel >>= derefLevel
+       sameStage <- and <$> mapM (\ (d, _) -> do { us <- getDictUses d; us' <- mapM derefLevel us; return (all (== lb) us') })
+                                (filter involved dcs)
        if any multiParam ctx ||       -- temporary workaround for
           -- Overloaded bind: fallback to monomorphic behavior
-          not (null ctx) && not (all isSynFcn bs') then
+          not (null ctx) && (not (all isSynFcn bs') || not sameStage) then
          return bs'
         else do
 --        traceM $ "tcBindGrp: u=" ++ show u ++ " xts=" ++ show xts ++ " ts'=" ++ show ts' ++ " cs=" ++ show cs
@@ -3645,16 +3781,29 @@ solveMany (cns@(di, ct) : cnss) uns sol imp = do
   ads <- gets argDicts
   -- Check if we have an exact match among the arguments dictionaries.
   -- This is important to find tupled dictionaries in recursive calls.
+  uses <- getDictUses di
   case [ ai | (ai, act) <- ads, ct `eqEType` act ] of
     ai : _ -> do
 --      tcTrace $ "solve with arg " ++ show ct
+      -- A dictionary argument can only be used at the stage where it is bound.
+      mal <- lookupLevel ai
+      case mal of
+        Just al | al /= LPoly -> mapM_ (unifyLevel loc ("the dictionary for " ++ showEType ct) al) uses
+        _ -> return ()
       solveMany cnss uns ((ct, (di, EVar ai)) : sol) imp
     [] -> do
       msol <- solver loc iCls cts
 --      tcTrace ("solveMany msol=" ++ show msol)
       case msol of
         Nothing           -> solveMany        cnss  (cns : uns)                  sol         imp
-        Just (de, gs, is) -> solveMany (gs ++ cnss)        uns ((ct, (di, de)) : sol) (is ++ imp)
+        Just (de, gs, is) -> do
+          -- New goals are used where the original goal was used.
+          mapM_ (\ (g, _) -> addDictUses g uses) gs
+          -- Global dictionaries are checked at the end of the module.
+          case exprIdentM de of
+            Just d -> addDictCheck loc d uses
+            Nothing -> return ()
+          solveMany (gs ++ cnss)        uns ((ct, (di, de)) : sol) (is ++ imp)
 
 solveInst :: SolveOne
 solveInst loc iCls cts = do
@@ -3939,6 +4088,362 @@ checkConstraints = do
       tcError (getSLoc i) $ "Cannot satisfy constraint: " ++ showExpr t'
                             ++ "\n     fully qualified: " ++ showExprRaw t'
 
+---------------------------------------------------------------
+-- Two-level type theory: stages (levels).
+--
+-- Every value identifier has a stage: meta (compile time), object (run time),
+-- or any (stage polymorphic).  Every type constructor has a stage signature
+-- giving the stage of the type and the stages of its arguments.
+-- Everything in a term is at the same stage, except under a quotation [| e |]
+-- (which goes from meta to object) and a splice ~e (object to meta).
+-- A 'let' or 'case' can bind at one stage and have a body at another;
+-- the type checker inserts EStaged markers for these, and they are turned into
+-- quotes/splices (or removed) when the stages are known, see zonkStage.
+
+nameCode :: String
+nameCode = "Primitives.Code"
+
+identCode :: Ident
+identCode = mkIdentB nameCode
+
+tCode :: SLoc -> EType -> EType
+tCode loc t = tApp (tConI loc nameCode) t
+
+-- Is the expected type (Code t)?
+unCode :: Expected -> T (Maybe EType)
+unCode (Infer _) = return Nothing
+unCode (Check t) = do
+  t' <- derefUVar t
+  case t' of
+    EApp (EVar c) a | c == identCode -> return (Just a)
+    _ -> return Nothing
+
+-- Stage signatures of the built in types that cannot be stage polymorphic.
+-- Code is the only type constructor that crosses stages.
+-- Types that are tied to the runtime system are object level.
+primTypeLevels :: TypeLevelTable
+primTypeLevels = M.fromList $
+  (identCode, (LMeta, [LObj])) :
+  [ (mkIdentB ("Primitives." ++ t), (LObj, replicate n LObj)) | (t, n) <- objTypes ]
+  where objTypes = [("IO", 1), ("IOArray", 1), ("MVar", 1), ("ThreadId", 0), ("Weak", 1),
+                    ("Ptr", 1), ("FunPtr", 1), ("ForeignPtr", 1)]
+
+-- The built in values (tuples, list constructors) are stage polymorphic.
+primLevels :: LevelTable
+primLevels = M.fromList [ (exprIdent e, LPoly) | (_, es) <- primValues, Entry e _ <- es ]
+
+-- The identifier of a symbol table entry expression.
+exprIdent :: Expr -> Ident
+exprIdent e = fromMaybe (impossiblePP e) (exprIdentM e)
+
+exprIdentM :: Expr -> Maybe Ident
+exprIdentM (EVar i) = Just i
+exprIdentM (ECon c) = Just (conIdent c)
+exprIdentM (EApp f _) = exprIdentM f
+exprIdentM _ = Nothing
+
+-- Compute the stage signatures of the data types and classes defined in this module.
+-- Each type gets a fresh signature, then the constructor fields (method types)
+-- are traversed, and finally the remaining stage variables are made schematic.
+addTypeLevels :: [EDef] -> T ()
+addTypeLevels ds = do
+  mn <- gets moduleName
+  let tys = [ (i, vks) | Data    (i, vks) _ _ <- ds ] ++
+            [ (i, vks) | Newtype (i, vks) _ _ <- ds ] ++
+            [ (i, vks) | Class _ (i, vks) _ _ <- ds ]
+  sigs <- forM tys $ \ (i, vks) -> do
+    let qi = qualIdent mn i
+    sig <- case M.lookup qi primTypeLevels of
+             Just sig -> return sig          -- wired in stage
+             Nothing -> do
+               r <- newLevelVar
+               as <- mapM (const newLevelVar) vks
+               return (r, as)
+    addTypeLevel qi sig
+    return (qi, sig)
+  let sigOf i = fromMaybe impossible $ lookup (qualIdent mn i) sigs
+      field env r t = expandSyn t >>= tcTypeLevel env (getSLoc t) r
+      constr (r, as) vks (Constr evks ctx _ _ ets) = do
+        env' <- mapM (\ ik -> (,) (idKindIdent ik) <$> newLevelVar) evks
+        let env = env' ++ zip (map idKindIdent vks) as
+        mapM_ (field env r) ctx
+        mapM_ (field env r) (either (map snd) (map (snd . snd)) ets)
+  forM_ ds $ \ d ->
+    case d of
+      Data    (i, vks) cs _ -> mapM_ (constr (sigOf i) vks) cs
+      Newtype (i, vks) c  _ -> constr (sigOf i) vks c
+      Class ctx (i, vks) _ ms -> do
+        let (r, as) = sigOf i
+            env = zip (map idKindIdent vks) as
+        mapM_ (field env r) ctx
+        mapM_ (field env r) [ t | Sign _ t <- ms ]
+      _ -> return ()
+  -- Generalize: remaining variables become schematic (negative numbers).
+  forM_ sigs $ \ (qi, (r, as)) -> do
+    r' <- derefLevel r
+    as' <- mapM derefLevel as
+    let vs = nub [ n | LVar n <- r' : as' ]
+        sub = zip vs [ LVar (negate k) | k <- [1..] ]
+        gen l@(LVar n) = fromMaybe l $ lookup n sub
+        gen l = l
+    addTypeLevel qi (gen r', map gen as')
+
+-- Instantiate the stage signature of a type constructor.
+-- Unknown type constructors (and type variables) are assumed to be
+-- stage polymorphic and homogeneous, i.e., all arguments have the stage of the type.
+instTypeLevelSig :: Ident -> Level -> T (Level, [Level])
+instTypeLevelSig i l = do
+  msig <- lookupTypeLevel i
+  case msig of
+    Nothing -> return (l, repeat l)
+    Just (r, as) -> do
+      let vs = nub [ n | LVar n <- r : as ]
+      sub <- mapM (\ n -> (,) n <$> newLevelVar) vs
+      let inst x@(LVar n) = fromMaybe x $ lookup n sub
+          inst x = x
+      return (inst r, map inst as ++ repeat l)
+
+-- Check that a (type) signature can be at stage l.
+tcTypeLevelSig :: SLoc -> Level -> EType -> T ()
+tcTypeLevelSig loc l t = tcTypeLevel [] loc l t
+
+-- Check the stage structure of a type, which is at stage l.
+-- The environment gives the stages of bound type variables.
+tcTypeLevel :: [(Ident, Level)] -> SLoc -> Level -> EType -> T ()
+tcTypeLevel env loc l at =
+  case at of
+    EForall _ iks t -> do
+      env' <- mapM (\ ik -> (,) (idKindIdent ik) <$> newLevelVar) iks
+      tcTypeLevel (env' ++ env) loc l t
+    EUVar _ -> return ()
+    ELit _ _ -> return ()
+    EVar _ -> app
+    EApp _ _ -> app
+    _ -> return ()
+  where
+    app =
+      case getAppM at of
+        Just (i, args) ->
+          case lookup i env of
+            Just lv -> do           -- a type variable
+              unifyLevel loc ("the type " ++ showEType at) lv l
+              mapM_ (tcTypeLevel env loc l) args
+            Nothing -> do
+              (r, as) <- instTypeLevelSig i l
+              unifyLevel loc ("the type " ++ showEType at) r l
+              zipWithM_ (tcTypeLevel env loc) as args
+        Nothing ->
+          case at of
+            EApp f a -> do { tcTypeLevel env loc l f; tcTypeLevel env loc l a }
+            _ -> return ()
+
+-- Are the two stages known to be the same?
+sameLevel :: Level -> Level -> T Bool
+sameLevel a b = do
+  a' <- derefLevel a
+  b' <- derefLevel b
+  return (a' == b')
+
+-- Make a stage adjustment marker, see zonkStage.
+mkStaged :: Level -> Level -> Maybe EType -> Expr -> T Expr
+mkStaged l1 l2 mt e = do
+  modify $ \ ts -> ts{ stagedNodes = True }
+  return (EStaged l1 l2 mt e)
+
+-- Check that the variable (as found in the symbol table) can be used at the current stage.
+useLevelE :: SLoc -> Expr -> EType -> T ()
+useLevelE loc e t = do
+  tcm <- gets tcMode
+  when (tcm == TCExpr) $ do
+    cur <- gets curLevel
+    let i = exprIdent e
+    mll <- gets (M.lookup i . localLevels)
+    ml <- case mll of
+            Just _ -> return mll
+            Nothing -> do
+              mg <- lookupLevelTable i
+              case mg of
+                -- A global definition that has not been checked yet: its stage is unknown.
+                -- Uses do not constrain it (it might be stage polymorphic), so defer the check.
+                Just (LVar _) -> do { addDictCheck loc i [cur]; return (Just LPoly) }
+                _ -> return mg
+    case ml of
+      Just LPoly -> return ()
+      Just l -> unifyLevel loc (showIdent i) l cur
+      Nothing ->
+        -- Not in the table, so the stage is determined by the type.
+        case t of
+          EUVar _ -> return ()
+          _ -> tcTypeLevelSig loc cur t
+
+-- Add the stage of a constructor (or method) of the type (class) tycon.
+addConLevel :: Ident -> Ident -> T ()
+addConLevel tycon c = do
+  mn <- gets moduleName
+  msig <- lookupTypeLevel (qualIdent mn tycon)
+  let l = case msig of
+            Just (LVar _, _) -> LPoly
+            Just (r, _) -> r
+            Nothing -> LPoly
+  addLevelTable (qualIdent mn c) l
+
+-- Invent a stage variable for a top level definition.
+addDefLevel :: EDef -> T ()
+addDefLevel d =
+  case d of
+    Fcn i _ | not (isConIdent i) -> do
+      l <- newLevelVar
+      k <- defKey i
+      addLevelTable k l
+    ForImp _ _ i _ -> do
+      k <- defKey i
+      addLevelTable k LObj   -- foreign functions are only available at run time
+    _ -> return ()
+
+-- The key in the stage table for a top level definition.
+-- This is the same as the name of the desugared definition.
+defKey :: Ident -> T Ident
+defKey i = do
+  mn <- gets moduleName
+  return (qualIdent' mn i)
+
+-- Get the stage (variable) of a top level definition.
+defLevel :: Ident -> T Level
+defLevel i = do
+  k <- defKey i
+  ml <- lookupLevelTable k
+  maybe newLevelVar instLevel ml
+
+-- Resolve the stages of the top level definitions.
+-- While checking, a use of a global definition whose stage is still a variable is
+-- deferred (it may turn out to be stage polymorphic).  Now all definitions have been
+-- checked, so the stage of a definition is fixed if its own body fixed it.
+-- Uses of fixed definitions are checked, which may fix more definitions, so iterate.
+-- Definitions whose stage is still a variable afterwards are stage polymorphic.
+checkDeferredLevels :: T ()
+checkDeferredLevels = do
+  cks <- gets dictChecks
+  modify $ \ ts -> ts{ dictChecks = [] }
+  let loop = do
+        n0 <- gets levelFixes
+        forM_ cks $ \ (loc, d, uses) -> do
+          ml <- lookupLevelTable d
+          case ml of
+            Just l | l /= LPoly -> do
+              l' <- derefLevel l
+              case l' of
+                LVar _ -> return ()           -- not fixed (yet)
+                _ -> mapM_ (unifyLevel loc (showIdent d) l') uses
+            _ -> return ()
+        n1 <- gets levelFixes
+        when (n1 /= n0) loop
+  loop
+
+-- Make the stage table suitable for export: only global (qualified) identifiers,
+-- and no stage variables.
+finalizeLevels :: T ()
+finalizeLevels = do
+  lt <- gets levelTable
+  let gen l = do
+        l' <- derefLevel l
+        case l' of
+          LVar _ -> return LPoly
+          _ -> return l'
+  -- Only the identifiers of this module can have stage variables.
+  mn <- gets moduleName
+  let pre = unIdent mn ++ "."
+      mine i = pre `isPrefixOf` unIdent i || isInstId i
+  lt' <- mapM (\ (i, l) -> (,) i <$> gen l) [ (i, l) | (i, l) <- M.toList lt, mine i, isLVar l ]
+  putLevelTable (foldr (uncurry M.insert) lt lt')
+  -- Reset the per module state.
+  modify $ \ ts -> ts{ levelSubst = IM.empty, localLevels = M.empty, dictUses = M.empty, dictChecks = [], curLevel = LObj }
+ where isLVar (LVar _) = True
+       isLVar _ = False
+
+-- Resolve the EStaged markers inserted for let/case/if.
+--   EStaged from to _ e
+-- means that e is at stage 'from', but is used at stage 'to'.
+zonkStageEqns :: [Eqn] -> T [Eqn]
+zonkStageEqns = mapM zonkStageEqn
+
+zonkStageEqn :: Eqn -> T Eqn
+zonkStageEqn (Eqn ps alts) = Eqn <$> mapM zonkStage ps <*> zonkStageAlts alts
+
+zonkStageAlts :: EAlts -> T EAlts
+zonkStageAlts (EAlts alts bs) = EAlts <$> mapM alt alts <*> mapM zonkStageBind bs
+  where alt (ss, e) = (,) <$> mapM zonkStageStmt ss <*> zonkStage e
+
+zonkStageBind :: EBind -> T EBind
+zonkStageBind (Fcn i eqns) = Fcn i <$> zonkStageEqns eqns
+zonkStageBind (PatBind p e) = PatBind <$> zonkStage p <*> zonkStage e
+zonkStageBind b = return b
+
+zonkStageStmt :: EStmt -> T EStmt
+zonkStageStmt (SBind p e) = SBind <$> zonkStage p <*> zonkStage e
+zonkStageStmt (SThen e) = SThen <$> zonkStage e
+zonkStageStmt (SLet bs) = SLet <$> mapM zonkStageBind bs
+zonkStageStmt (SRec ss) = SRec <$> mapM zonkStageStmt ss
+
+zonkStage :: Expr -> T Expr
+zonkStage ae =
+  case ae of
+    EVar _ -> return ae
+    EApp f a -> EApp <$> zonkStage f <*> zonkStage a
+    EOper e ies -> EOper <$> zonkStage e <*> mapM (\ (i, e') -> (,) i <$> zonkStage e') ies
+    ELam l qs -> ELam l <$> zonkStageEqns qs
+    ELit _ _ -> return ae
+    EQLit _ _ _ -> return ae
+    ECase e as -> ECase <$> zonkStage e <*> mapM (\ (p, alts) -> (,) <$> zonkStage p <*> zonkStageAlts alts) as
+    ELet bs e -> ELet <$> mapM zonkStageBind bs <*> zonkStage e
+    ETuple es -> ETuple <$> mapM zonkStage es
+    EParen e -> EParen <$> zonkStage e
+    EListish (LList es) -> EListish . LList <$> mapM zonkStage es
+    EListish (LCompr e ss) -> (\ e' ss' -> EListish (LCompr e' ss')) <$> zonkStage e <*> mapM zonkStageStmt ss
+    EListish _ -> return ae
+    EDo mn ss -> EDo mn <$> mapM zonkStageStmt ss
+    ESectL e i -> (`ESectL` i) <$> zonkStage e
+    ESectR i e -> ESectR i <$> zonkStage e
+    EIf e1 e2 e3 -> EIf <$> zonkStage e1 <*> zonkStage e2 <*> zonkStage e3
+    EMultiIf alts -> EMultiIf <$> zonkStageAlts alts
+    ESign e t -> (`ESign` t) <$> zonkStage e
+    ENegApp e -> ENegApp <$> zonkStage e
+    EUpdate e fs -> (`EUpdate` fs) <$> zonkStage e
+    ESelect _ -> return ae
+    ETypeArg _ -> return ae
+    EQuote e -> EQuote <$> zonkStage e
+    ESplice e -> ESplice <$> zonkStage e
+    EStaged l1 l2 mt e -> do
+      e' <- zonkStage e
+      a <- derefLevel l1
+      b <- derefLevel l2
+      let loc = getSLoc e
+      case (a, b) of
+        _ | a == b -> return e'
+        (LVar _, _) -> do { _ <- unifyLevelM a b; return e' }   -- unconstrained: pick the stage of the context
+        (_, LVar _) -> do { _ <- unifyLevelM a b; return e' }
+        (LMeta, LObj) -> do
+          -- A meta level expression used at object level: splice it.
+          -- If this is the body of a binding/case we know its type, which must be Code.
+          case mt of
+            Nothing -> return ()
+            Just t -> do
+              t' <- derefUVar t
+              case t' of
+                EApp (EVar c) _ | c == identCode -> return ()
+                EUVar _ -> do { b' <- newUVar; unify loc t' (tCode loc b') }
+                _ -> tcError loc $ "object level binding in meta level expression of non-code type " ++ showEType t'
+          return (ESplice e')
+        (LObj, LMeta) -> return (EQuote e')
+        _ -> impossible
+    EAt i e -> EAt i <$> zonkStage e
+    EViewPat e p -> EViewPat <$> zonkStage e <*> zonkStage p
+    ELazy b p -> ELazy b <$> zonkStage p
+    EOr ps -> EOr <$> mapM zonkStage ps
+    EForall _ _ _ -> return ae
+    EUVar _ -> return ae
+    EQVar _ _ -> return ae
+    ECon _ -> return ae
+
 -- Add a type equality constraint.
 addEqConstraint :: SLoc -> EType -> EType -> T ()
 addEqConstraint loc t1 t2 = do
@@ -4030,7 +4535,7 @@ showSymTab :: SymTab -> String
 showSymTab (SymTab im ies) = showListS showIdent (map fst (M.toList im) ++ map fst ies)
 
 showTModuleExps :: TModule a -> String
-showTModuleExps (TModule mn _fxs tys _syns _clss _insts vals _defs) =
+showTModuleExps (TModule mn _fxs tys vals _dflts _defs _meta) =
   showIdent mn ++ ":\n" ++
     unlines (map (("  " ++) . showValueExport) vals) ++
     unlines (map (("  " ++) . showTypeExport)  tys)

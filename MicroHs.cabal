@@ -93,6 +93,7 @@ executable mhs
                        MicroHs.Package
                        MicroHs.Parse
                        MicroHs.State
+                       MicroHs.Stage
                        MicroHs.StateIO
                        MicroHs.SymTab
                        MicroHs.TCMonad

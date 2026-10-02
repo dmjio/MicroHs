@@ -90,7 +90,7 @@ defaultFlags = Flags {
   embedPkgs   = []
   }
 
-data DumpFlag = Dpreproc | Dparse | Dderive | DexpandInst | Dtypecheck | Ddesugar | Dlinked | Dtoplevel | Dcombinator | Dall
+data DumpFlag = Dpreproc | Dparse | Dderive | DexpandInst | Dtypecheck | Ddesugar | Dstage | Dlinked | Dtoplevel | Dcombinator | Dall
   deriving (Eq, Show, Enum, Bounded)
 
 dumpIf :: Monad m => Flags -> DumpFlag -> m () -> m ()

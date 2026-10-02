@@ -8,7 +8,9 @@ import Data.Functor.Identity
 import Control.Applicative
 import Control.Monad.Fail
 import Data.Functor
+import Control.Monad(when, unless)
 import Data.List(nub)
+import Data.Maybe(fromMaybe)
 import MicroHs.Expr
 import MicroHs.Ident
 import qualified MicroHs.IdentMap as M
@@ -163,9 +165,27 @@ data TCState = TC {
                   ArgDicts              -- dictionary arguments
                  ),
   constraints :: Constraints,           -- constraints that have to be solved
-  defaults    :: Defaults               -- current defaults
+  defaults    :: Defaults,              -- current defaults
+  -- Two-level type theory (staging) state.
+  curLevel    :: Level,                 -- stage of the expression being checked
+  levelSubst  :: IM.IntMap Level,       -- solved level variables (not reset by tcReset)
+  levelTable  :: LevelTable,            -- stage of each global value identifier (qualified)
+  localLevels :: LevelTable,            -- stage of each local variable
+  typeLevels  :: TypeLevelTable,        -- stage signature of each type constructor and class
+  dictUses    :: M.Map [Level],         -- the stages at which each dictionary identifier is used
+  dictChecks  :: [(SLoc, Ident, [Level])],  -- deferred stage checks of uses of global values and dictionaries
+  stagedNodes :: Bool,                  -- were any EStaged nodes created for the current definition
+  levelFixes  :: Int                    -- number of level variables bound so far
   }
   deriving (Show)
+
+type LevelTable = M.Map Level           -- stage of value identifiers; LPoly means any stage
+
+-- The stage signature of a type constructor: the stage of (T a1 ... an)
+-- and the stages of the arguments a1 ... an.
+-- An LVar in a signature is schematic, i.e., instantiated with a fresh variable at each use.
+type LevelSig = (Level, [Level])
+type TypeLevelTable = M.Map LevelSig
 
 -- Hack to avoid cricular module reference.
 -- See comment for SetTCState in Expr
@@ -236,6 +256,107 @@ putDefaults ds = modify $ \ ts -> ts{ defaults = ds }
 
 
 type TRef = Int
+
+-----------------------------------------------
+-- Levels (stages)
+
+putCurLevel :: Level -> T ()
+putCurLevel l = modify $ \ ts -> ts{ curLevel = l }
+
+-- Run an action with a given current stage.
+withLevel :: forall a . Level -> T a -> T a
+withLevel l ta = do
+  o <- gets curLevel
+  putCurLevel l
+  a <- ta
+  putCurLevel o
+  return a
+
+newLevelVar :: T Level
+newLevelVar = LVar <$> newUniq
+
+-- Find the representative of a level.
+derefLevel :: Level -> T Level
+derefLevel l@(LVar n) = do
+  m <- gets levelSubst
+  case IM.lookup n m of
+    Nothing -> return l
+    Just l' -> do
+      l'' <- derefLevel l'
+      when (l'' /= l') $   -- path compression
+        modify $ \ ts -> ts{ levelSubst = IM.insert n l'' (levelSubst ts) }
+      return l''
+derefLevel l = return l
+
+-- Unify two levels.  Returns False if they are different constants.
+unifyLevelM :: Level -> Level -> T Bool
+unifyLevelM a b = do
+  a' <- derefLevel a
+  b' <- derefLevel b
+  case (a', b') of
+    _ | a' == b' -> return True
+    (LVar n, _) -> do { modify $ \ ts -> ts{ levelSubst = IM.insert n b' (levelSubst ts), levelFixes = levelFixes ts + 1 }; return True }
+    (_, LVar n) -> do { modify $ \ ts -> ts{ levelSubst = IM.insert n a' (levelSubst ts), levelFixes = levelFixes ts + 1 }; return True }
+    (LPoly, _) -> return True     -- should not happen, but be lenient
+    (_, LPoly) -> return True
+    _ -> return False
+
+unifyLevel :: HasCallStack => SLoc -> String -> Level -> Level -> T ()
+unifyLevel loc msg a b = do
+  ok <- unifyLevelM a b
+  unless ok $ do
+    a' <- derefLevel a
+    b' <- derefLevel b
+    tcError loc $ "stage mismatch: " ++ msg ++ " is " ++ showLevel a' ++ " level, but is used at " ++ showLevel b' ++ " level"
+
+-- Make a (possibly polymorphic) table level usable: LPoly gives a fresh variable.
+instLevel :: Level -> T Level
+instLevel LPoly = newLevelVar
+instLevel l = derefLevel l
+
+lookupLevelTable :: Ident -> T (Maybe Level)
+lookupLevelTable i = gets (M.lookup i . levelTable)
+
+-- Look up the stage of a variable, local variables first.
+lookupLevel :: Ident -> T (Maybe Level)
+lookupLevel i = do
+  ml <- gets (M.lookup i . localLevels)
+  case ml of
+    Just _ -> return ml
+    Nothing -> lookupLevelTable i
+
+addLocalLevel :: Ident -> Level -> T ()
+addLocalLevel i l = modify $ \ ts -> ts{ localLevels = M.insert i l (localLevels ts) }
+
+putLocalLevels :: LevelTable -> T ()
+putLocalLevels lt = modify $ \ ts -> ts{ localLevels = lt }
+
+addLevelTable :: Ident -> Level -> T ()
+addLevelTable i l = modify $ \ ts -> ts{ levelTable = M.insert i l (levelTable ts) }
+
+putLevelTable :: LevelTable -> T ()
+putLevelTable lt = modify $ \ ts -> ts{ levelTable = lt }
+
+lookupTypeLevel :: Ident -> T (Maybe LevelSig)
+lookupTypeLevel i = gets (M.lookup i . typeLevels)
+
+addTypeLevel :: Ident -> LevelSig -> T ()
+addTypeLevel i s = modify $ \ ts -> ts{ typeLevels = M.insert i s (typeLevels ts) }
+
+-- Record that dictionary d is used at the current stage.
+addDictUse :: Ident -> T ()
+addDictUse d = do
+  l <- gets curLevel
+  modify $ \ ts -> ts{ dictUses = M.insertWith (++) d [l] (dictUses ts) }
+
+addDictUses :: Ident -> [Level] -> T ()
+addDictUses d ls = modify $ \ ts -> ts{ dictUses = M.insertWith (++) d ls (dictUses ts) }
+
+getDictUses :: Ident -> T [Level]
+getDictUses d = gets (fromMaybe [] . M.lookup d . dictUses)
+
+addDictCheck :: SLoc -> Ident -> [Level] -> T ()
+addDictCheck loc d ls = modify $ \ ts -> ts{ dictChecks = (loc, d, ls) : dictChecks ts }
 
 newUniq :: T TRef
 newUniq = do

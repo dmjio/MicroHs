@@ -46,6 +46,7 @@ import qualified MicroHs.IdentMap as M
 import MicroHs.List
 import MicroHs.Package
 import MicroHs.Parse
+import MicroHs.Stage
 import MicroHs.StateIO
 import MicroHs.SymTab
 import MicroHs.TCMonad(TCState)
@@ -258,12 +259,20 @@ compileModuleP flags impt mdl@(EModule _ _ defs) = do
     liftIO $ putStrLn $ "type checked:\n" ++ showTModule showEDefs tmdl ++ "-----\n"
   let
     dmdl = desugar flags tmdl
+  -- Two-level type theory: run the compile time (meta level) computations
+  -- in the object level definitions, and separate out the meta level definitions.
+  cash <- get
+  let
+    (smdl, staged) = stageModule (gLevels glob') (cachedModules cash) dmdl
+  dumpIf flags Dstage $
+    unless (null staged) $
+      liftIO $ putStrLn $ "staged:\n" ++ showLDefs staged
   t4 <- liftIO getTimeMilli
 
   let tThis = t4 - t3
       tImp = sum tImps
 
-  return ((dmdl, syms, imported, tThis, tImp), tcstate)
+  return ((smdl, syms, imported, tThis, tImp), tcstate)
 
 compileToCombinators :: TModule [LDef] -> TModule [LDef]
 compileToCombinators dmdl =
@@ -615,8 +624,10 @@ getPaths = do
       inplace <- doesFileExist (upDir </> "src/runtime/eval.c")
       if inplace then do
         let libDir = upDir </> "lib"
-            nogmpDir | not (wantGMP || wantImath) = [libDir </> "no-gmp"]
-                     | otherwise                  = []
+            -- Two-level type theory: Integer must be usable at compile time,
+            -- so always use the Integer implementation written in Haskell,
+            -- not the GMP/imath one (which is a foreign pointer).
+            nogmpDir = [libDir </> "no-gmp"]
         return (upDir, srcs ++ nogmpDir ++ [libDir], Nothing)
        else do
         let vers = "mhs-" ++ mhsVersion

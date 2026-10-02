@@ -28,6 +28,8 @@ class a ~ b | a -> b, b -> a
 
 -- Types
 data AnyType deriving ()
+-- Two-level type theory: (Code a) is the meta level type of object level code of type a.
+data Code a deriving ()
 --data Char
 newtype Char = Char Word deriving ()
 data Int deriving ()
