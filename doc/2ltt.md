@@ -30,8 +30,8 @@ with the definitional equalities `~[| e |] = e` and `[| ~e |] = e`.
 A splice binds tighter than application: `~f x` is `(~f) x`.
 
 Everything else is ordinary Haskell.  The stage of a term is determined by its
-type: a type that mentions `Code` is a meta level type; `IO`, `IORef`, `Ptr`,
-`MVar` and the other runtime system types are object level; all other types are
+type: a type that mentions `Code` is a meta level type; all other types
+(including `IO`, `Ptr` and the other runtime system types) are
 *stage polymorphic* and can be used at either stage.  Likewise a top level
 definition whose body uses a quotation is meta level, one that uses a splice is
 object level, and anything else (including the entire Prelude) is stage
@@ -48,8 +48,14 @@ cube :: Int -> Int                            -- object level: ordinary run time
 cube x = ~(power 3 [| x |])                   -- compiles to  cube x = x * (x * (x * 1))
 ```
 
-Meta level code is evaluated by the compiler, and never exists at run time;
+Meta level code is run by the compiler, and never exists at run time;
 object level code is compiled as usual after all splices have been executed.
+The compiler runs meta level code with the ordinary MicroHs runtime system (the
+same way the interactive system runs code), so compile time code behaves exactly
+like run time code and can use all of the library, including the parts that
+use the FFI (`Integer`, `show` for `Double`, ...).  It follows that splices
+need a compiler that is itself compiled with MicroHs; the GHC compiled
+compiler (`gmhs`) reports an error for a module with a splice.
 The result of staging can be inspected with `mhs -ddump-stage`.
 
 ### Mixed stages
@@ -105,7 +111,8 @@ e.g. `show (sum [1..100 :: Int])` can be computed at compile time.
 ### Library
 
 `lib/Staged.hs` provides `Code`, the serialization functions `codeInt`, `codeWord`,
-`codeChar`, `codeDouble`, `codeFloat`, `codeString`, `codeBool`, and the code
+`codeChar`, `codeDouble`, `codeFloat`, `codeString`, `codeBool`, `codeInteger`,
+`codeList` (the code for a list, from the code of its elements), and the code
 generation monad `Gen` with `runGen`, `gen` (let insertion) and `genLet`.
 
 ## Implementation
@@ -130,9 +137,10 @@ the same stage except under quote/splice, so a single level per term suffices.
   known before use.
 * Type constructors and classes have *stage signatures* (`typeLevels`,
   `gTypeLevels`): the stage of `T a1 .. an` and the stages of the arguments.
-  `Code :: (meta, [object])`, runtime types are object level, user data types
-  are inferred from their constructor fields (`addTypeLevels`) and are
-  polymorphic when unconstrained.  Written types (signatures, annotations,
+  `Code :: (meta, [object])`, user data types are inferred from their
+  constructor fields (`addTypeLevels`) and are polymorphic when unconstrained.
+  Foreign imports are stage polymorphic, except `foreign import javascript`,
+  which is object level (JavaScript is not there in the compiler).  Written types (signatures, annotations,
   instance heads) are checked against the current level with `tcTypeLevel`.
 * `let`, `case` and `if` get `EStaged from to e` markers; after a definition
   is checked, `zonkStage` turns them into `EQuote`/`ESplice` or removes them.
@@ -143,27 +151,46 @@ the same stage except under quote/splice, so a single level per term suffices.
 ### Staging (`src/MicroHs/Stage.hs`)
 
 After desugaring, quotations and splices are the pseudo primitives `$quote`
-and `$splice`.  Following section 4 of the ICFP 2022 paper, staging uses two
-evaluators over the desugared lambda terms:
+and `$splice`.  Staging follows section 4 of the ICFP 2022 paper, which has
+two evaluators.  The meta level evaluator is the runtime system; only the
+object level one is in the compiler.
 
-* `eval1` evaluates meta level code to values (closures, numbers, strings,
-  quoted code).  It interprets the desugared code of the current module, the
-  compiled code of imported modules (the combinators `S`, `K`, `B`, ... and the
-  arithmetic primitives are implemented in `primVal`), and the meta level
-  definitions of imported modules, which are kept in lambda form in
-  `tMetaDefs`.
-* `eval0` traverses object level code, renaming binders (HOAS closures, read
-  back with de Bruijn levels so that generated code never captures variables)
-  and executing splices.
+* Meta level code is compiled to combinators and loaded into the running
+  runtime system with `MicroHs.Translate`, like the interactive system does.
+  A quotation is compiled (`quoteExp`) to code that builds a value of the type
+  `Code` in `Stage.hs`: applications, global variables, literals, and binders
+  as functions (HOAS).  There is no library definition of that type; the
+  constructor functions are generated (`codeConstrs`) with the data type
+  encoding the compiler itself uses, so the compiler can use the value that
+  the runtime computes directly.  `Staged.codeInt` etc. are these constructors.
+* The meta level definitions of a module are kept, as combinators, in
+  `tMetaDefs`, for the splices of the modules that import it.
+* The splices of a module are taken out of its object level definitions
+  (`prepExp`): splice number n becomes a meta level function of the object
+  level variables it uses, and all of them are loaded together, with the
+  imported modules and the splice free definitions of the module itself.
+  An object level variable that is `let` bound to an expression that does not
+  depend on the object level can also be used inside the splice at the meta
+  level; this is what the dictionary bindings of the type checker need.
+* `eval0` traverses the object level code, with the binders as HOAS closures.
+  At a splice it applies the splice function to the code of its variables.
+  The result is read back (`quote0`) with de Bruijn levels, so that generated
+  code never captures variables.
 
-Meta level definitions are removed from the generated program.  Everything
-is lazy, so compile time computation has ordinary Haskell semantics; a
-compile time `error` or an unsupported primitive (FFI, IO) is reported as a
-staging error.
+Meta level definitions are removed from the generated program.  An exception
+in compile time code (`error`, division by zero, ...) is reported as an error
+at the definition with the splice.  Since the splices are loaded with all the
+code they can reach, the real modules of the `.hs-boot` modules are compiled
+before the first module with a splice is staged.
+
+Compile time code runs on the machine of the compiler, so with a cross
+compiling target (e.g., emscripten) `Int` has the size of the host, and a
+foreign function that is not in the runtime system of the compiler (one from
+the user's own C code) cannot be called at compile time.
 
 ### Files touched
 
 `Expr.hs` (`EQuote`, `ESplice`, `EStaged`, `Level`), `Parse.hs`,
 `TCMonad.hs`, `TypeCheck.hs`, `Desugar.hs`, `Stage.hs` (new), `Compile.hs`,
 `Flags.hs` (`-ddump-stage`), `lib/Primitives.hs` (`Code`), `lib/Staged.hs` (new),
-`tests/Staged*.hs`.
+`tests/Staged*.hs`, `tests/stagederr.test`, `tests/istaged.in`.

@@ -4123,13 +4123,10 @@ unCode (Check t) = do
 
 -- Stage signatures of the built in types that cannot be stage polymorphic.
 -- Code is the only type constructor that crosses stages.
--- Types that are tied to the runtime system are object level.
+-- All other types are stage polymorphic: meta level code is run by the runtime
+-- system, so even the types that are tied to it (IO, Ptr, ...) exist at compile time.
 primTypeLevels :: TypeLevelTable
-primTypeLevels = M.fromList $
-  (identCode, (LMeta, [LObj])) :
-  [ (mkIdentB ("Primitives." ++ t), (LObj, replicate n LObj)) | (t, n) <- objTypes ]
-  where objTypes = [("IO", 1), ("IOArray", 1), ("MVar", 1), ("ThreadId", 0), ("Weak", 1),
-                    ("Ptr", 1), ("FunPtr", 1), ("ForeignPtr", 1)]
+primTypeLevels = M.fromList [(identCode, (LMeta, [LObj]))]
 
 -- The built in values (tuples, list constructors) are stage polymorphic.
 primLevels :: LevelTable
@@ -4295,9 +4292,11 @@ addDefLevel d =
       l <- newLevelVar
       k <- defKey i
       addLevelTable k l
-    ForImp _ _ i _ -> do
+    ForImp cc _ i _ -> do
+      -- Meta level code is run by the runtime system of the compiler, so it can call
+      -- foreign functions, but not JavaScript, which is only there in the compiled program.
       k <- defKey i
-      addLevelTable k LObj   -- foreign functions are only available at run time
+      addLevelTable k (if cc == Cjavascript then LObj else LPoly)
     _ -> return ()
 
 -- The key in the stage table for a top level definition.

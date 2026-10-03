@@ -3,10 +3,10 @@ MHSOUTPUT=
 MHS=../bin/gmhs
 TMHS=$(MHS) $(MHSTARGET) $(MHSOUTPUT)
 EVAL=../bin/mhseval +RTS -H1M -RTS
-.PHONY: test nfib clean errtest alltest cache info
+.PHONY: test nfib clean errtest alltest cache info stagedtest interactivetest
 
 alltest: info test errtest testforimp testforexp testforimpexp testapplysp testpipenonblockio testpreprocessorpaths
-# interactivetest
+# stagedtest interactivetest
 
 cache:
 	rm -f .mhscache
@@ -58,9 +58,6 @@ test:
 	$(TMHS) IOArray    && $(EVAL) > IOArray.out    && diff IOArray.ref IOArray.out
 	$(TMHS) ST         && $(EVAL) > ST.out         && diff ST.ref ST.out
 	$(TMHS) HigherKind && $(EVAL) > HigherKind.out && diff HigherKind.ref HigherKind.out
-	$(TMHS) Staged1    && $(EVAL) > Staged1.out    && diff Staged1.ref Staged1.out
-	$(TMHS) Staged2    && $(EVAL) > Staged2.out    && diff Staged2.ref Staged2.out
-	$(TMHS) Staged3    && $(EVAL) > Staged3.out    && diff Staged3.ref Staged3.out
 	$(TMHS) PolyKind   && $(EVAL) > PolyKind.out   && diff PolyKind.ref PolyKind.out
 	$(TMHS) Record     && $(EVAL) > Record.out     && diff Record.ref Record.out
 	$(TMHS) Deriving   && $(EVAL) > Deriving.out   && diff Deriving.ref Deriving.out
@@ -166,6 +163,16 @@ testpipenonblockioem:
 
 errtest:
 	sh errtester.sh $(MHS) < errmsg.test
+
+# Splices are run by the runtime system, so this needs an mhs compiled with mhs.
+stagedtest:
+	$(TMHS) Staged1    && $(EVAL) > Staged1.out    && diff Staged1.ref Staged1.out
+	$(TMHS) Staged2    && $(EVAL) > Staged2.out    && diff Staged2.ref Staged2.out
+	$(TMHS) Staged3    && $(EVAL) > Staged3.out    && diff Staged3.ref Staged3.out
+	$(TMHS) Staged4    && $(EVAL) > Staged4.out    && diff Staged4.ref Staged4.out
+	$(TMHS) StagedInteger && $(EVAL) > StagedInteger.out && diff StagedInteger.ref StagedInteger.out
+	sh errtester.sh $(MHS) < stagederr.test
+	$(TMHS) --stdin < istaged.in | sed -e '1,/^>/d' > istaged.out && diff istaged.ref istaged.out
 
 interactivetest:
 	$(TMHS) --stdin < itest.in | sed -e '1,/^>/d' > itest.out && diff itest.ref itest.out

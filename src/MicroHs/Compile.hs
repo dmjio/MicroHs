@@ -261,9 +261,24 @@ compileModuleP flags impt mdl@(EModule _ _ defs) = do
     dmdl = desugar flags tmdl
   -- Two-level type theory: run the compile time (meta level) computations
   -- in the object level definitions, and separate out the meta level definitions.
+  -- The splices are run by the runtime system, which needs all the code they can
+  -- reach, so the real modules of the boot modules have to be there.
+  let needRun = any (hasSplice . snd) (tBindingsOf dmdl)
+  when needRun $
+    loadBoots flags
   cash <- get
   let
-    (smdl, staged) = stageModule (gLevels glob') (cachedModules cash) dmdl
+    (smdl, staged, metaCode) = stageModule (gLevels glob') (cachedModules cash) dmdl
+  when needRun $ liftIO $ do
+    -- Find all the errors in the module before running any of its code.
+    _ <- evaluate (rnf (tBindingsOf dmdl))
+    _ <- evaluate (rnf metaCode)
+    -- Run the splices, a definition at a time.
+    forM_ staged $ \ (i, e) -> do
+      r <- try (evaluate (rnf e))
+      case r of
+        Right () -> return ()
+        Left exn -> errorMessage (getSLoc i) $ "exception in compile time code: " ++ show (exn :: SomeException)
   dumpIf flags Dstage $
     unless (null staged) $
       liftIO $ putStrLn $ "staged:\n" ++ showLDefs staged
@@ -616,8 +631,7 @@ getPaths = do
   let srcs = ["."]
   case mdir of
     -- If MHSDIR is set, use that and no package directories
-    -- (Always use the Integer written in Haskell, see below.)
-    Just dir -> return (dir, srcs ++ [dir </> "lib" </> "no-gmp", dir </> "lib"], Nothing)
+    Just dir -> return (dir, srcs ++ [dir </> "lib"], Nothing)
     Nothing -> do
       -- There are two scenarios: either we are running inplace or installed
       binDir <- takeDirectory <$> catch getExecutablePath (\ (_ :: SomeException) -> getProgName) -- ~/.mcabal/bin
@@ -625,10 +639,8 @@ getPaths = do
       inplace <- doesFileExist (upDir </> "src/runtime/eval.c")
       if inplace then do
         let libDir = upDir </> "lib"
-            -- Two-level type theory: Integer must be usable at compile time,
-            -- so always use the Integer implementation written in Haskell,
-            -- not the GMP/imath one (which is a foreign pointer).
-            nogmpDir = [libDir </> "no-gmp"]
+            nogmpDir | not (wantGMP || wantImath) = [libDir </> "no-gmp"]
+                     | otherwise                  = []
         return (upDir, srcs ++ nogmpDir ++ [libDir], Nothing)
        else do
         let vers = "mhs-" ++ mhsVersion

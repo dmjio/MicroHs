@@ -2,364 +2,248 @@
 --
 -- After type checking and desugaring, a module contains three kinds of definitions:
 --  * meta level definitions (stage LMeta): only exist at compile time.
---    They are kept (in lambda form) in tMetaDefs so that importing modules can run them.
+--    They are kept (as combinators) in tMetaDefs so that importing modules can run them.
 --  * object level definitions (stage LObj): run time code.  They can contain splices
 --    (~e, marked by the pseudo primitive "$splice") which are evaluated here.
 --  * stage polymorphic definitions: ordinary code, usable at both stages.
 --
 -- Staging follows Kovács, "Staged Compilation with Two-Level Type Theory" (ICFP 2022),
--- section 4: a meta level evaluator (eval1) producing values, where quoted code is a value,
--- and an object level "evaluator" (eval0) that only renames variables and executes splices.
--- Object level binders are handled with HOAS closures and read back with de Bruijn levels.
+-- section 4, with the meta level evaluator being the ordinary runtime system:
+--  * Meta level code is compiled to combinators and run by the runtime system, in the
+--    same way as the interactive system runs code (MicroHs.Translate).  So compile time
+--    code has exactly the run time semantics, and can use everything the runtime can
+--    (e.g., the FFI).  A quotation is compiled to code that builds a value of type Code,
+--    with the object level binders as functions (HOAS).
+--  * The object level "evaluator" (eval0) runs in the compiler.  It only renames
+--    variables and executes splices, and the result is read back (quote0) with
+--    de Bruijn levels, so generated code never captures variables.
 module MicroHs.Stage(
   stageModule,
   ) where
 import qualified Prelude(); import MHSPrelude
-import Data.Char(ord, chr, isDigit)
 import Data.Int(Int64)
-import Data.Word(Word)
-import Data.Bits
-import Data.List(partition)
+import Data.List(partition, nub)
 import Data.Maybe
+import Unsafe.Coerce(unsafeCoerce)
+import MicroHs.Abstract(compileOpt)
 import MicroHs.Desugar(LDef, quotePrim, splicePrim, hasSplice)
+import MicroHs.EncodeData(encConstr, encList)
 import MicroHs.Exp
-import MicroHs.Expr(Lit(..), Level(..), showLit, HasLoc(..))
+import MicroHs.Expr(Lit(..), Level(..), showLit, HasLoc(..), errorMessage)
 import MicroHs.Ident
 import qualified MicroHs.IdentMap as M
 import MicroHs.Names(uniqIdentSep)
+import MicroHs.State
 import MicroHs.TCMonad(LevelTable)
-import MicroHs.TypeCheck(TModule, tBindingsOf, tMetaDefs, setBindings, setMetaDefs)
-import Text.PrettyPrint.HughesPJLiteClass(prettyShow)
+import MicroHs.Translate(translateMap, translateWithMap)
+import MicroHs.TypeCheck(TModule, tBindingsOf, tMetaDefs, setBindings, setMetaDefs, impossible)
 
 -- Stage a desugared module.
 -- Returns the module with the meta level definitions moved to tMetaDefs and all
--- splices in object level definitions executed, together with the list of staged definitions.
-stageModule :: LevelTable -> [TModule [LDef]] -> TModule [LDef] -> (TModule [LDef], [LDef])
+-- splices in object level definitions executed, together with the list of staged definitions,
+-- and the compiled meta level code of the module.  Forcing the latter finds the staging
+-- errors in the module; forcing a staged definition runs its splices.
+stageModule :: LevelTable -> [TModule [LDef]] -> TModule [LDef] -> (TModule [LDef], [LDef], [Exp])
 stageModule levels imported dmdl =
   let defs = tBindingsOf dmdl
       isMeta (i, _) = M.lookup i levels == Just LMeta
       (metas, objs) = partition isMeta defs
-      -- Everything a compile time computation might need.
-      globals = Globals $ M.fromList
-                  [ (i, eval1 globals M.empty e)
-                  | (i, e) <- defs ++ concat [ tBindingsOf tm ++ tMetaDefs tm | tm <- imported ] ]
-      stage (i, e) | hasSplice e = (i, quote0 0 $ eval0 globals M.empty e)
+      -- Meta level definitions: compile the quotations and turn them into combinators.
+      metas' = [ (i, compileOpt (metaExp (getSLoc i) M.empty e)) | (i, e) <- metas ]
+      -- Object level definitions: take out the splices.
+      (objs', (_, rsplices)) = runState (mapM prepDef objs) (0, [])
+      -- Everything a compile time computation might need:
+      -- the imported modules, and the definitions of this module that have no splices.
+      tmap = translateMap $ codeConstrs ++ concat [ tBindingsOf tm ++ tMetaDefs tm | tm <- imported ]
+      here = metas' ++ [ (i, compileOpt e) | (i, e) <- objs, not (hasSplice e) ]
+      -- All the splices of the module are loaded into the runtime together.
+      fns :: [SpliceFn]
+      fns = unsafeCoerce $ translateWithMap tmap (here, compileOpt (encList (reverse rsplices)))
+      stage (i, e) | hasSplice e = (i, quote0 0 $ eval0 fns M.empty e)
                    | otherwise   = (i, e)
-      objs' = map stage objs
-      staged = [ d | (d, (_, e)) <- zip objs' objs, hasSplice e ]
-  in  (setMetaDefs (setBindings dmdl objs') metas, staged)
+      objs'' = map stage objs'
+      staged = [ d | (d, (_, e)) <- zip objs'' objs, hasSplice e ]
+      noRun (i, _) = errorMessage (getSLoc i)
+                       "splices are run by the MicroHs runtime, so they need a compiler that is compiled with mhs"
+  in  case staged of
+        d : _ | not compiledWithMhs -> noRun d
+        _ -> (setMetaDefs (setBindings dmdl objs'') metas', staged, map snd metas' ++ rsplices)
+
+stageError :: forall a . SLoc -> String -> a
+stageError loc msg = errorMessage loc $ "staging error: " ++ msg
 
 -----------------------------------------------
--- Values
-
--- Meta level values.
-data Val
-  = VLam (Val -> Val)        -- functions, and Scott encoded data
-  | VInt Int                 -- Int, Word, Char, Int64, Word64
-  | VDbl Double
-  | VFlt Float
-  | VStr String              -- a string literal, behaves as a Scott encoded list
-  | VQuote Code              -- quoted object level code
-  | VTup Val Val             -- only used internally when extracting lists
+-- Object level code
 
 -- Object level code, with HOAS binders.
+-- Values of this type are also built by meta level code running in the runtime system.
+-- There is no source definition of the type for that code, instead the constructor
+-- functions are generated here (codeConstrs), with the encoding the compiler itself uses.
+-- So the constructors below, their order, and their arities must agree with codeConTable.
 data Code
-  = CVar Int Ident           -- de Bruijn level and base name
-  | CGlobal Ident
+  = CVar Int String              -- de Bruijn level and base name; only made by quote0
+  | CExp Exp                     -- a global variable or a literal; only made by eval0
+  | CGlobal String               -- global variable
   | CApp Code Code
-  | CLam Ident (Code -> Code)
-  | CLit Lit
+  | CLam String (Code -> Code)
+  | CInt Int                     -- literals
+  | CInt64 Int64
+  | CDbl Double
+  | CFlt Float
+  | CChr Char
+  | CStr String
+  | CPrim String
 
--- Environment entries for local variables.
-data Ent = EV Val | EC Code
+-- Name and arity of the constructors of Code, in order.
+codeConTable :: [(String, Int)]
+codeConTable =
+  [ ("var", 2), ("exp", 1), ("global", 1), ("app", 2), ("lam", 2)
+  , ("int", 1), ("int64", 1), ("dbl", 1), ("flt", 1), ("chr", 1), ("str", 1), ("prim", 1) ]
 
-type Env = M.Map Ent
+-- The constructor functions of Code for the code run by the runtime system.
+codeConstrs :: [LDef]
+codeConstrs = [ (codeCon s, compileOpt (encConstr i n (replicate a False))) | (i, (s, a)) <- zip [0..] codeConTable ]
+  where n = length codeConTable
 
-newtype Globals = Globals (M.Map Val)
+codeCon :: String -> Ident
+codeCon s = mkIdent ("$Code." ++ s)
 
-stageError :: forall a . String -> a
-stageError msg = error $ "staging error: " ++ msg
+con1 :: String -> Exp -> Exp
+con1 s = App (Var (codeCon s))
+
+con2 :: String -> Exp -> Exp -> Exp
+con2 s a = App (App (Var (codeCon s)) a)
 
 -----------------------------------------------
--- Meta level evaluation
+-- Compiling meta level code
 
-eval1 :: Globals -> Env -> Exp -> Val
-eval1 g env ae =
+-- How a local variable is bound.
+data Bind
+  = BMeta                -- meta level variable
+  | BObj (Maybe Exp)     -- object level variable (it is bound to Code when in meta level code).
+                         -- When it is let bound to a expression that does not depend on the
+                         -- object level, that expression is also its value at the meta level.
+                         -- (This happens for the dictionary bindings the type checker inserts.)
+
+type BEnv = M.Map Bind
+
+-- Compile meta level code: quotations become code that builds a Code value.
+metaExp :: SLoc -> BEnv -> Exp -> Exp
+metaExp loc env ae =
   case ae of
     Var i ->
       case M.lookup i env of
-        Just (EV v) -> v
-        Just (EC _) -> stageError $ "object level variable used at compile time: " ++ showIdent i
-        Nothing -> globalVal g i
-    App (Lit (LPrim p)) e | p == quotePrim -> VQuote (eval0 g env e)
-                          | p == splicePrim -> stageError "splice at meta level"
-    App f a -> apply (eval1 g env f) (eval1 g env a)
-    Lam x e -> VLam $ \ v -> eval1 g (M.insert x (EV v) env) e
-    Lit l -> litVal l
+        Just (BObj (Just e)) -> e
+        Just (BObj Nothing) -> stageError loc $ "object level variable used at compile time: " ++ showIdent i
+        _ -> ae
+    App (Lit (LPrim p)) e | p == quotePrim -> quoteExp loc env e
+                          | p == splicePrim -> stageError loc "splice at meta level"
+    App f a -> App (metaExp loc env f) (metaExp loc env a)
+    Lam x e -> Lam x (metaExp loc (M.insert x BMeta env) e)
+    -- Cross stage persistence of literals (Staged.codeInt etc)
+    Lit (LPrim "$liftInt") -> Var (codeCon "int")
+    Lit (LPrim "$liftDouble") -> Var (codeCon "dbl")
+    Lit (LPrim "$liftFloat") -> Var (codeCon "flt")
+    Lit (LPrim "$liftString") -> Var (codeCon "str")
+    Lit _ -> ae
 
-globalVal :: Globals -> Ident -> Val
-globalVal (Globals m) i =
-  case M.lookup i m of
-    Just v -> v
-    Nothing
-      | isIdent "Control.Error._errorLoc" i || isIdent "Control.Error._undefinedLoc" i ->
-        VLam $ \ l -> VLam $ \ s -> stageError $ "error called at compile time: " ++ valString l ++ valString s
-      | otherwise -> stageError $ "unknown global at compile time: " ++ showIdent i
+-- Compile quoted object level code to meta level code that builds it.
+-- Object level binders become meta level functions on Code.
+quoteExp :: SLoc -> BEnv -> Exp -> Exp
+quoteExp loc env ae =
+  case ae of
+    Var i ->
+      case M.lookup i env of
+        Nothing -> con1 "global" (Lit (LStr (unIdent i)))
+        Just (BObj _) -> ae
+        Just BMeta -> stageError loc $ "meta level variable used in object code: " ++ showIdent i
+    App (Lit (LPrim p)) e | p == splicePrim -> metaExp loc env e
+                          | p == quotePrim -> stageError loc "quotation at object level"
+    App (Lam x b) a -> con2 "app" (lam x (BObj (metaView env a)) b) (quoteExp loc env a)
+    App f a -> con2 "app" (quoteExp loc env f) (quoteExp loc env a)
+    Lam x e -> lam x (BObj Nothing) e
+    Lit l ->
+      case l of
+        LInt _    -> con1 "int" ae
+        LInt64 _  -> con1 "int64" ae
+        LDouble _ -> con1 "dbl" ae
+        LFloat _  -> con1 "flt" ae
+        LChar _   -> con1 "chr" ae
+        LStr _    -> con1 "str" ae
+        LPrim p   -> con1 "prim" (Lit (LStr p))
+        _ -> stageError loc $ "literal not supported in a quotation: " ++ showLit l
+  where lam x b e = con2 "lam" (Lit (LStr (unIdent x))) (Lam x (quoteExp loc (M.insert x b env) e))
 
-apply :: Val -> Val -> Val
-apply f a =
-  case f of
-    VLam h -> h a
-    VStr "" -> VLam (const a)                                        -- [] n c = n
-    VStr (c:cs) -> VLam $ \ k -> apply (apply k (VInt (ord c))) (VStr cs)   -- (x:xs) n c = c x xs
-    VInt _ -> stageError "application of an integer"
-    VDbl _ -> stageError "application of a double"
-    VFlt _ -> stageError "application of a float"
-    VQuote _ -> stageError "application of code"
-    VTup _ _ -> stageError "application of a tuple"
-
-apply2 :: Val -> Val -> Val -> Val
-apply2 f a b = apply (apply f a) b
-
--- Force a value to weak head normal form.
-whnf :: Val -> ()
-whnf v =
-  case v of
-    VLam _ -> ()
-    VInt _ -> ()
-    VDbl _ -> ()
-    VFlt _ -> ()
-    VStr _ -> ()
-    VQuote _ -> ()
-    VTup _ _ -> ()
-
-litVal :: Lit -> Val
-litVal l =
-  case l of
-    LInt i -> VInt i
-    LInt64 i -> VInt (fromIntegral i)
-    LDouble d -> VDbl d
-    LFloat f -> VFlt f
-    LChar c -> VInt (ord c)
-    LStr s -> VStr s
-    LPrim p -> primVal p
-    LTick _ -> VLam id
-    LForImp _ _ _ _ -> stageError "foreign function called at compile time"
-    _ -> stageError $ "literal not supported at compile time: " ++ showLit l
-
--- Convert a Scott encoded list to a Haskell list.
-valList :: Val -> [Val]
-valList v =
-  case v of
-    VStr s -> map (VInt . ord) s
-    _ ->
-      case apply2 v (VInt 0) (VLam $ \ x -> VLam $ \ xs -> VTup x xs) of
-        VTup x xs -> x : valList xs
-        _ -> []
-
-valString :: Val -> String
-valString = map (chr . valInt) . valList
-
-valInt :: Val -> Int
-valInt (VInt i) = i
-valInt _ = stageError "integer expected"
-
-valDbl :: Val -> Double
-valDbl (VDbl d) = d
-valDbl _ = stageError "double expected"
-
-valFlt :: Val -> Float
-valFlt (VFlt f) = f
-valFlt _ = stageError "float expected"
-
-vBool :: Bool -> Val
-vBool False = cK      -- False n c  (encIf c t e = c e t)
-vBool True  = cA
-
-vOrdering :: Ordering -> Val
-vOrdering LT = cK2
-vOrdering EQ = cKK
-vOrdering GT = cKA
-
--- Some Scott encoded constructors
-cK, cA, cK2, cKK, cKA :: Val
-cK  = VLam $ \ x -> VLam (const x)
-cA  = VLam $ const (VLam id)
-cK2 = VLam $ \ x -> VLam $ const (VLam (const x))
-cKK = VLam $ const (VLam $ \ y -> VLam (const y))
-cKA = VLam $ const (VLam $ const (VLam id))
+-- The value of an object level expression at the meta level,
+-- if it does not depend on anything at the object level.
+metaView :: BEnv -> Exp -> Maybe Exp
+metaView env ae =
+  case ae of
+    Var i ->
+      case M.lookup i env of
+        Just (BObj m) -> m
+        _ -> Just ae
+    App f a -> App <$> metaView env f <*> metaView env a
+    Lam x e -> Lam x <$> metaView (M.insert x BMeta env) e
+    Lit (LPrim p) | p == quotePrim || p == splicePrim -> Nothing
+    Lit _ -> Just ae
 
 -----------------------------------------------
--- Primitives
+-- Taking out the splices
 
-primVal :: String -> Val
-primVal p =
-  case p of
-    "S"   -> lam3 $ \ f g x -> apply (apply f x) (apply g x)
-    "K"   -> cK
-    "I"   -> VLam id
-    "B"   -> lam3 $ \ f g x -> apply f (apply g x)
-    "C"   -> lam3 $ \ f g x -> apply (apply f x) g
-    "S'"  -> lam4 $ \ k f g x -> apply (apply k (apply f x)) (apply g x)
-    "B'"  -> lam4 $ \ k f g x -> apply (apply k f) (apply g x)
-    "C'"  -> lam4 $ \ k f g x -> apply (apply k (apply f x)) g
-    "A"   -> cA
-    "U"   -> lam2 $ \ x y -> apply y x
-    "Y"   -> VLam $ \ f -> let r = apply f r in r
-    "Z"   -> lam3 $ \ f g _ -> apply f g
-    "J"   -> lam3 $ \ x _ z -> apply z x
-    "P"   -> lam3 $ \ x y f -> apply2 f x y
-    "R"   -> lam3 $ \ x y f -> apply2 y f x
-    "O"   -> lam4 $ \ x y _ f -> apply2 f x y
-    "L"   -> lam3 $ \ x f _ -> apply f x
-    "K2"  -> cK2
-    "KK"  -> cKK
-    "KA"  -> cKA
-    "K3"  -> lam4 $ \ x _ _ _ -> x
-    "K4"  -> lam4 $ \ x _ _ _ -> VLam (const x)
-    "C'B" -> lam4 $ \ x y z w -> apply (apply x z) (apply y w)
-    'T':ds | Just n <- readIntMaybe ds -> tupleCon n
-    'T':'A':'G':ds | Just n <- readIntMaybe ds -> VLam $ \ x -> VLam $ \ f -> apply2 f (VInt n) x
+-- Replace each splice ~e in an object level definition by
+--   $splice n x1 ... xk
+-- where n is the number of the splice and x1 ... xk are the object level variables in e.
+-- Splice number n is the meta level function \ x1 ... xk -> e.
+prepDef :: LDef -> State (Int, [Exp]) LDef
+prepDef (i, e) | hasSplice e = (,) i <$> prepExp (getSLoc i) M.empty e
+               | otherwise   = return (i, e)
 
-    -- Int (and Word, Char, Int64, Word64)
-    "+" -> arith (+)
-    "-" -> arith (-)
-    "*" -> arith (*)
-    "quot" -> arith quot
-    "rem" -> arith rem
-    "subtract" -> arith subtract
-    "neg" -> arith1 negate
-    "inv" -> arith1 complement
-    "u+" -> arith (+)
-    "u-" -> arith (-)
-    "u*" -> arith (*)
-    "usubtract" -> arith subtract
-    "uneg" -> arith1 negate
-    "uquot" -> arithW quot
-    "urem" -> arithW rem
-    "and" -> arith (.&.)
-    "or" -> arith (.|.)
-    "xor" -> arith xor
-    "shl" -> arith shiftL
-    "shr" -> lam2 $ \ x y -> VInt (fromIntegral (shiftR (toWord (valInt x)) (valInt y)))
-    "ashr" -> arith shiftR
-    "popcount" -> arith1 popCount
-    "clz" -> arith1 (countLeadingZeros . toWord)
-    "ctz" -> arith1 (countTrailingZeros . toWord)
-    "==" -> cmpI (==)
-    "/=" -> cmpI (/=)
-    "<"  -> cmpI (<)
-    "<=" -> cmpI (<=)
-    ">"  -> cmpI (>)
-    ">=" -> cmpI (>=)
-    "u<"  -> cmpW (<)
-    "u<=" -> cmpW (<=)
-    "u>"  -> cmpW (>)
-    "u>=" -> cmpW (>=)
-    "icmp" -> lam2 $ \ x y -> vOrdering (compare (valInt x) (valInt y))
-    "ucmp" -> lam2 $ \ x y -> vOrdering (compare (toWord (valInt x)) (toWord (valInt y)))
-    'I':q | q `elem` ["+","-","*","quot","rem","subtract","neg","inv","u+","u-","u*","usubtract","uneg","uquot","urem",
-                      "and","or","xor","shl","shr","ashr","popcount","clz","ctz","==","/=","<","<=",">",">=",
-                      "u<","u<=","u>","u>=","icmp","ucmp"] -> primVal q
-    "itoI" -> VLam id
-    "Itoi" -> VLam id
-    "utoU" -> VLam id
-    "Utou" -> VLam id
-    "ord" -> VLam id
-    "chr" -> VLam id
-
-    -- Double
-    "d+" -> darith (+)
-    "d-" -> darith (-)
-    "d*" -> darith (*)
-    "d/" -> darith (/)
-    "dneg" -> VLam $ \ x -> VDbl (negate (valDbl x))
-    "d==" -> dcmp (==)
-    "d/=" -> dcmp (/=)
-    "d<"  -> dcmp (<)
-    "d<=" -> dcmp (<=)
-    "d>"  -> dcmp (>)
-    "d>=" -> dcmp (>=)
-    "itod" -> VLam $ \ x -> VDbl (fromIntegral (valInt x))
-    "Itod" -> VLam $ \ x -> VDbl (fromIntegral (valInt x))
-    "utod" -> VLam $ \ x -> VDbl (fromIntegral (toWord (valInt x)))
-    "dtoi" -> VLam $ \ x -> VInt (truncate (valDbl x))
-    "dtof" -> VLam $ \ x -> VFlt (realToFrac (valDbl x))
-    "ftod" -> VLam $ \ x -> VDbl (realToFrac (valFlt x))
-
-    -- Float
-    "f+" -> farith (+)
-    "f-" -> farith (-)
-    "f*" -> farith (*)
-    "f/" -> farith (/)
-    "fneg" -> VLam $ \ x -> VFlt (negate (valFlt x))
-    "f==" -> fcmp (==)
-    "f/=" -> fcmp (/=)
-    "f<"  -> fcmp (<)
-    "f<=" -> fcmp (<=)
-    "f>"  -> fcmp (>)
-    "f>=" -> fcmp (>=)
-    "itof" -> VLam $ \ x -> VFlt (fromIntegral (valInt x))
-    "Itof" -> VLam $ \ x -> VFlt (fromIntegral (valInt x))
-    "utof" -> VLam $ \ x -> VFlt (fromIntegral (toWord (valInt x)))
-    "ftoi" -> VLam $ \ x -> VInt (truncate (valFlt x))
-
-    -- Cross stage persistence of literals (Staged.codeInt etc)
-    "$liftInt" -> VLam $ \ x -> VQuote (CLit (LInt (valInt x)))
-    "$liftDouble" -> VLam $ \ x -> VQuote (CLit (LDouble (valDbl x)))
-    "$liftFloat" -> VLam $ \ x -> VQuote (CLit (LFloat (valFlt x)))
-    "$liftString" -> VLam $ \ x -> VQuote (CLit (LStr (valString x)))
-
-    "seq" -> lam2 $ \ a b -> whnf a `seq` b
-    "rnf" -> lam2 $ \ a b -> whnf a `seq` b    -- XXX only weak head normal form
-    "raise" -> VLam $ \ _ -> stageError "uncaught exception at compile time"
-    "tick" -> VLam id
-
-    _ -> stageError $ "primitive not available at compile time: " ++ p
-  where
-    lam2 f = VLam $ \ a -> VLam $ \ b -> f a b
-    lam3 f = VLam $ \ a -> VLam $ \ b -> VLam $ \ c -> f a b c
-    lam4 f = VLam $ \ a -> VLam $ \ b -> VLam $ \ c -> VLam $ \ d -> f a b c d
-    arith op = lam2 $ \ x y -> VInt (op (valInt x) (valInt y))
-    arith1 op = VLam $ \ x -> VInt (op (valInt x))
-    arithW op = lam2 $ \ x y -> VInt (fromIntegral (op (toWord (valInt x)) (fromIntegral (valInt y) :: Word)))
-    cmpI op = lam2 $ \ x y -> vBool (op (valInt x) (valInt y))
-    cmpW op = lam2 $ \ x y -> vBool (op (toWord (valInt x)) (toWord (valInt y)))
-    darith op = lam2 $ \ x y -> VDbl (op (valDbl x) (valDbl y))
-    dcmp op = lam2 $ \ x y -> vBool (op (valDbl x) (valDbl y))
-    farith op = lam2 $ \ x y -> VFlt (op (valFlt x) (valFlt y))
-    fcmp op = lam2 $ \ x y -> vBool (op (valFlt x) (valFlt y))
-    -- T_n x1 ... xn f = f x1 ... xn
-    tupleCon n = go n []
-      where go 0 xs = VLam $ \ f -> foldl apply f (reverse xs)
-            go k xs = VLam $ \ x -> go (k - 1 :: Int) (x : xs)
-
-toWord :: Int -> Word
-toWord = fromIntegral
-
-readIntMaybe :: String -> Maybe Int
-readIntMaybe s | not (null s) && all isDigit s = Just (foldl (\ a c -> a * 10 + ord c - ord '0') 0 s)
-               | otherwise = Nothing
+prepExp :: SLoc -> BEnv -> Exp -> State (Int, [Exp]) Exp
+prepExp loc env ae =
+  case ae of
+    App (Lit (LPrim p)) e
+      | p == splicePrim -> do
+          let e' = metaExp loc env e
+              xs = nub [ x | x <- freeVars e', isJust (M.lookup x env) ]
+          (n, ss) <- get
+          put (n + 1, lams xs e' : ss)
+          return $ App (Lit (LPrim splicePrim)) (apps (Lit (LInt n)) (map Var xs))
+      | p == quotePrim -> stageError loc "quotation at object level"
+    App (Lam x b) a -> do
+      a' <- prepExp loc env a
+      b' <- prepExp loc (M.insert x (BObj (metaView env a)) env) b
+      return (App (Lam x b') a')
+    App f a -> App <$> prepExp loc env f <*> prepExp loc env a
+    Lam x e -> Lam x <$> prepExp loc (M.insert x (BObj Nothing) env) e
+    _ -> return ae
 
 -----------------------------------------------
 -- Object level evaluation: rename variables, execute splices.
 
-eval0 :: Globals -> Env -> Exp -> Code
-eval0 g env ae =
+-- The splice functions are in the first argument.
+eval0 :: [SpliceFn] -> M.Map Code -> Exp -> Code
+eval0 fns env ae =
   case ae of
-    Var i ->
-      case M.lookup i env of
-        Just (EC c) -> c
-        Just (EV _) -> stageError $ "meta level variable used in object code: " ++ showIdent i
-        Nothing -> CGlobal i
+    Var i -> fromMaybe (CExp ae) (M.lookup i env)
     App (Lit (LPrim p)) e | p == splicePrim ->
-                              case eval1 g env e of
-                                VQuote c -> c
-                                _ -> stageError "splice of a non-code value"
-                          | p == quotePrim -> stageError "quotation at object level"
-    App f a -> CApp (eval0 g env f) (eval0 g env a)
-    Lam x e -> CLam x $ \ c -> eval0 g (M.insert x (EC c) env) e
-    Lit l -> CLit l
+      case getApp e of
+        (Lit (LInt n), as) -> runSplice (fns !! n) (map (eval0 fns env) as)
+        _ -> impossible
+    App f a -> CApp (eval0 fns env f) (eval0 fns env a)
+    Lam x e -> CLam (unIdent x) $ \ c -> eval0 fns (M.insert x c env) e
+    Lit _ -> CExp ae
+  where
+    getApp (App f a) = case getApp f of (h, as) -> (h, as ++ [a])
+    getApp e = (e, [])
+
+-- Run a splice function (a value in the runtime system) on the code of its variables.
+runSplice :: SpliceFn -> [Code] -> Code
+runSplice f [] = unsafeCoerce f
+runSplice f (c : cs) = runSplice ((unsafeCoerce f :: Code -> SpliceFn) c) cs
+
+-- A splice function in the runtime system; it takes some Code arguments and returns Code.
+data SpliceFn
 
 -- Read back object level code to an expression.
 -- Binders are named after the original variable and the de Bruijn level.
@@ -367,14 +251,18 @@ quote0 :: Int -> Code -> Exp
 quote0 d ac =
   case ac of
     CVar l x -> Var (lvlIdent l x)
-    CGlobal i -> Var i
+    CExp e -> e
+    CGlobal i -> Var (mkIdent i)
     CApp f a -> App (quote0 d f) (quote0 d a)
-    CLam x f -> Lam (lvlIdent d x) (quote0 (d + 1) (f (CVar d x)))
-    CLit l -> Lit l
+    CLam x f | isDummyIdent (mkIdent x) -> Lam dummyIdent (quote0 (d + 1) (f (CVar d x)))
+             | otherwise -> Lam (lvlIdent d x) (quote0 (d + 1) (f (CVar d x)))
+    CInt i -> Lit (LInt i)
+    CInt64 i -> Lit (LInt64 i)
+    CDbl x -> Lit (LDouble x)
+    CFlt x -> Lit (LFloat x)
+    CChr c -> Lit (LChar c)
+    CStr s -> Lit (LStr s)
+    CPrim p -> Lit (LPrim p)
 
-lvlIdent :: Int -> Ident -> Ident
-lvlIdent l x = mkIdentSLoc (getSLoc x) (unIdent x ++ uniqIdentSep ++ "s" ++ show l)
-
--- Keep the pretty printer import used (for debugging aids).
-_showCode :: Exp -> String
-_showCode = prettyShow
+lvlIdent :: Int -> String -> Ident
+lvlIdent l x = mkIdent (x ++ uniqIdentSep ++ "s" ++ show l)
