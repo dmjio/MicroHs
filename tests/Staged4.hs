@@ -1,5 +1,6 @@
 module Staged4(main) where
 import Data.Char
+import Data.Int
 import Staged
 
 -- Meta level code is run by the runtime system, so everything the runtime
@@ -21,7 +22,7 @@ root :: String
 root = ~(codeString (show (sqrt 2 :: Double)))
 
 bounds :: String
-bounds = ~(codeString (show (minBound :: Int, maxBound :: Int)))
+bounds = ~(codeString (show (minBound :: Int32, maxBound :: Int32)))
 
 -- The character tables are byte strings.
 shout :: String
