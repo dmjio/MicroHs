@@ -170,7 +170,7 @@ JavaScript trampoline, which makes `-Oz` (which does not inline) several times s
 exception handling (browsers since 2022) `-Oz` is as fast as `-O3` and about 12% smaller compressed.
 `browser_js` cannot use it (there is no WebAssembly) and stays at `-O3`.
 
-JavaScript files can be embedded in the generated output with `-js FILE` (e.g., a JavaScript runtime
+JavaScript files can be embedded in the generated output by giving `FILE.js` on the command line (e.g., a JavaScript runtime
 library used via the FFI).  A target supports this if it has a `js` key in `mhs.conf` giving the
 C compiler option to use (`js = "--pre-js"` for emscripten); for other targets the files are ignored.
 Installed packages can also carry JavaScript files, in a `jsbits` directory next to the package
