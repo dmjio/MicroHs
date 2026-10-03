@@ -73,6 +73,8 @@ EM_JS(void, mhs_js_init, (void), {
      * function.  Identical literals may be merged by the C compiler, so a snippet used
      * both by a synchronous and an interruptible import has one address for both. */
     fns: new Map(),
+    /* Compiled [js| ... |] quotes (GHC.Wasm.Marshal.jsQuote), keyed by their source. */
+    quotes: new Map(),
     /* Handles are positive C ints; wrap around (skipping live handles) after 2^31-1. */
     newJSVal: function(v) {
       var k = M.lastk;
@@ -174,6 +176,16 @@ EM_JS(void, mhs_js_init, (void), {
       if (f === undefined) {
         f = M.compile(UTF8ToString(srcp), n, false);
         M.fns.set(srcp, f);
+      }
+      return f.apply(null, args);
+    },
+    /* Run the code of a [js| ... |] quote with $1, $2, ... bound to args (an Array);
+     * the code is compiled when first used. */
+    inline: function(src, args) {
+      var f = M.quotes.get(src);
+      if (f === undefined) {
+        f = M.compile(src, args.length, false);
+        M.quotes.set(src, f);
       }
       return f.apply(null, args);
     },

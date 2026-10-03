@@ -157,6 +157,21 @@ A fatal runtime error, or a JavaScript exception from an `unsafe` import, inside
 in the browser the page lives on, so every later call into Haskell then throws an `Error` saying that the
 runtime has stopped (instead of running on a corrupted runtime).
 See `tests/JSVal.hs` and `tests/JSCallback.hs` for examples.
+
+### Inline JavaScript
+With a JavaScript target (one with a `js` option in `targets.conf`: `emscripten`, `browser`, ...)
+JavaScript code can also be written inline, as `[js| ... |]`.  The code is an expression, or statements
+that use `return`, like in `foreign import javascript`.  `${e}` in the code is the value of the Haskell
+expression `e`, converted with `toJSVal`, and the result is converted with `fromJSValUnchecked`:
+```Haskell
+n <- [js| ${a} + ${b} |] :: IO Int
+[js| console.log("hello, " + ${name}) |] :: IO ()
+```
+The classes `ToJSVal` and `FromJSVal` (in `GHC.Wasm.Marshal`, following GHCJS) have instances for `JSVal`,
+`JSString`, `Text`, `String`, the numeric types, `Char`, `Bool`, `()`, `Maybe` (`null` or `undefined` is
+`Nothing`) and lists (arrays).  The code is compiled once, when the quote is first run; a JavaScript
+exception in it is raised as a `JSException`.  With other targets `[js|` is not special, so `[js|js<-xs]`
+is still a list comprehension.  See `tests/JSQuote.hs`.
 The runtime can also be compiled to JavaScript on its own (`make rts.js`) to run combinator files with node:
 `node rts.js prog.comb`.
 The targets `emscripten_js` (for node) and `quickjs` (for a plain JavaScript shell, e.g., `qjs out.js`)

@@ -90,6 +90,6 @@ formatFailed (LastFail _ ts msgs) =
 
 parseConfig :: FilePath -> String -> Either String Config
 parseConfig fp file =
-  case runPrsr sections $ lex (SLoc fp 1 1) file of
+  case runPrsr sections $ lex False (SLoc fp 1 1) file of
     Left lf -> Left $ formatFailed lf
     Right a -> Right a

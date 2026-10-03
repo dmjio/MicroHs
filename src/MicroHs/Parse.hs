@@ -10,7 +10,7 @@ import Data.Char
 import Data.List
 import Data.Maybe
 import Text.ParserComb as P
-import MicroHs.Builtin(builtinMdl)
+import MicroHs.Builtin(builtinMdl, mkBuiltin)
 import MicroHs.Lex
 import MicroHs.List
 import MicroHs.Expr hiding (getSLoc)
@@ -30,17 +30,18 @@ infixl 4 *>, <*
 
 type P a = Prsr LexState Token a
 
+-- The Bool enables the [js| ... |] syntax (JavaScript targets).
 parseDie :: forall a . -- (Show a) =>
-            P a -> FilePath -> String -> a
-parseDie p fn file =
-  case parse p fn file of
+            Bool -> P a -> FilePath -> String -> a
+parseDie js p fn file =
+  case parse js p fn file of
     Left msg -> mhsError msg
     Right a -> a
 
 parse :: forall a . -- (Show a) =>
-         P a -> FilePath -> String -> Either String a
-parse p fn file =
-  let { ts = lexTopLS fn file } in
+         Bool -> P a -> FilePath -> String -> Either String a
+parse js p fn file =
+  let { ts = lexTopLS js fn file } in
   case runPrsr p ts of
     Left lf -> Left $ formatFailed lf
     Right a -> Right a
@@ -330,6 +331,25 @@ pInterpolate mqual = do
   frags <- many (pStr <|> pExp)
   pSpec 'E'
   pure $ EApp fin $ foldr (eApp2 app) emp frags
+
+-- Inline JavaScript (see GHC.Wasm.Marshal)
+--   [js| code ${e1} code ${e2} code |]
+-- desugars to
+--   jsQuote "code $1 code $2 code" [toJSVal e1, toJSVal e2]
+pJSQuote :: P Expr
+pJSQuote = do
+  loc <- getSLoc
+  pSpec 'J'
+  frags <- many ((Left <$> pString) <|> (Right <$> (pSpec '$' *> pExpr <* pSpec '%')))
+  pSpec 'K'
+  let quote = EVar $ mkBuiltin loc "jsQuote"
+      toJS  = EVar $ mkBuiltin loc "toJSVal"
+      code :: Int -> [Either String Expr] -> String
+      code _ [] = ""
+      code n (Left  s : fs) = s ++ code n fs
+      code n (Right _ : fs) = '$' : show n ++ code (n + 1) fs
+      args = [ EApp toJS e | Right e <- frags ]
+  pure $ eApp2 quote (ELit loc (LStr (code 1 frags))) (EListish (LList args))
 
 pNumLit :: P Expr
 pNumLit = guardM pLit isNum
@@ -893,6 +913,7 @@ pAExpr' =
       (EVar   <$> pLQIdentSym)
   <|> (EVar   <$> pUQIdentSym)
   <|> pLit
+  <|> pJSQuote
   <|> (lpar *> (eTuple <$> sepBy pExpr comma) <* rpar)
   <|> (lbra *> (EListish <$> pListish) <* rbra)
   <|> (lpar *> (ESectL <$> pExprOp) <*> (pOperComma <* rpar))

@@ -1,8 +1,9 @@
 module MicroHs.Flags(
   Flags(..), verbosityGT, defaultFlags,
   DumpFlag(..), dumpIf,
-  wantGMP) where
+  wantGMP, jsTarget) where
 import qualified Prelude(); import MHSPrelude
+import Data.Maybe(isJust)
 import MicroHs.Config
 
 data Flags = Flags {
@@ -46,6 +47,14 @@ data Flags = Flags {
   embedPkgs  :: [String]      -- embed these packages
   }
   deriving (Show)
+
+-- The target can run JavaScript, i.e., it has a js option in targets.conf
+-- (emscripten, browser, ...).  This enables the [js| ... |] syntax.
+jsTarget :: Flags -> Bool
+jsTarget flags =
+  case lookup (target flags) (config flags) of
+    Just sect -> isJust (lookup "js" sect)
+    Nothing   -> False
 
 verbosityGT :: Flags -> Int -> Bool
 verbosityGT flags v = verbose flags > v

@@ -155,6 +155,9 @@ testforexpjs:
 testjsval:
 	MHSDIR=.. $(TMHS) -temscripten JSVal -of.js && node f.js > JSVal.out && diff JSVal.ref JSVal.out
 
+testjsquote:
+	MHSDIR=.. $(TMHS) -temscripten JSQuote -of.js && node f.js > JSQuote.out && diff JSQuote.ref JSQuote.out
+
 testjscallback:
 	MHSDIR=.. $(TMHS) -temscripten JSCallback -of.js && node f.js > JSCallback.out 2>&1 && diff JSCallback.ref JSCallback.out
 
