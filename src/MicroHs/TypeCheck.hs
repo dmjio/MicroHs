@@ -4547,8 +4547,8 @@ showIdentClassInfo (i, (_vks, _ctx, cc, ms)) =
 -}
 
 doDeriving :: EDef -> T [EDef]
-doDeriving def@(Data    lhs cs ds)    = (def:) . concat <$> mapM (deriveDer False lhs  cs) (addTypeable (getSLoc lhs) ds)
-doDeriving def@(Newtype lhs  c ds)    = (def:) . concat <$> mapM (deriveDer True  lhs [c]) (addTypeable (getSLoc lhs) ds)
+doDeriving def@(Data    lhs cs ds)    = (def:) . concat <$> (mapM (deriveDer False lhs  cs) =<< addTypeableL lhs ds)
+doDeriving def@(Newtype lhs  c ds)    = (def:) . concat <$> (mapM (deriveDer True  lhs [c]) =<< addTypeableL lhs ds)
 doDeriving (StandDeriving as _ act)   = do
   -- The StandDeriving has not been typechecked yet, so do it now.
   def@(StandDeriving s n ct) <- withTypeTable $ tcStand as act
@@ -4558,6 +4558,16 @@ doDeriving def@(Class _ (n, _) _ _) | unIdent n /= "~" && deriveClassTypeable = 
   mn <- gets moduleName
   return [def, mkTypeableInst mn n]
 doDeriving def                        = return [def]
+
+-- Two-level type theory: Typeable is run time type information, so meta level
+-- types (e.g., types with Code fields) do not get an automatic Typeable instance.
+addTypeableL :: LHS -> [Deriving] -> T [Deriving]
+addTypeableL (i, _) ds = do
+  mn <- gets moduleName
+  msig <- lookupTypeLevel (qualIdent mn i)
+  case msig of
+    Just (LMeta, _) -> return ds
+    _ -> return (addTypeable (getSLoc i) ds)
 
 -- Add Data.Typeable to the derivings.
 -- Also skip all derivings (including Typeable) if it is says 'deriving ()'
