@@ -186,6 +186,7 @@ library base
         Numeric.FormatFloat
         Numeric.Natural
         Prelude
+        Staged
         System.Cmd
         System.Console.GetOpt
         System.Compress
