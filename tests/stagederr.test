@@ -1,0 +1,17 @@
+module E() where
+import Staged
+x :: Int
+x = ~(codeInt (1 `div` length ""))
+-----
+"../tmp/E.hs": line 5, col 1: exception in compile time code: divide by zero
+
+=====
+module E() where
+import Staged
+x :: Int
+x = ~(codeInt (error "boom"))
+-----
+"../tmp/E.hs": line 5, col 1: exception in compile time code: error: "../tmp/E.hs",5:16: boom
+
+=====
+END

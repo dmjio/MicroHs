@@ -1,0 +1,6 @@
+import Staged
+pw :: Int -> Code Int -> Code Int; pw n x = if n == 0 then [| 1 |] else [| ~x * ~(pw (n - 1) x) |]
+cube :: Int -> Int; cube x = ~(pw 3 [| x |])
+cube 5
+~(codeString (show (2 ^ (70 :: Int) :: Integer)))
+:q

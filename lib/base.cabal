@@ -19,8 +19,7 @@ library base
     if flag(gmp)
       hs-source-dirs: gmp .
     else
-      -- Two-level type theory: the Integer written in Haskell is usable at compile time
-      hs-source-dirs: no-gmp .
+      hs-source-dirs: .
     exposed-modules:
         Control.Applicative
         Control.Arrow

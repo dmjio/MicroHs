@@ -14,10 +14,11 @@
 module Staged(
   Code,
   codeInt, codeWord, codeChar, codeDouble, codeFloat, codeString,
-  codeBool,
+  codeBool, codeInteger, codeList,
   Gen(..), runGen, gen, genLet,
   ) where
 import Prelude
+import Data.Integer(_integerToIntList, _intListToInteger)
 import Primitives(Code)
 
 -- Serialization of compile time literals into object level literals.
@@ -44,6 +45,14 @@ codeString = _primitive "$liftString"
 codeBool :: Bool -> Code Bool
 codeBool True = [| True |]
 codeBool False = [| False |]
+
+codeInteger :: Integer -> Code Integer
+codeInteger i = [| _intListToInteger ~(codeList (map codeInt (_integerToIntList i))) |]
+
+-- The code for a list, from the code of its elements.
+codeList :: [Code a] -> Code [a]
+codeList [] = [| [] |]
+codeList (c : cs) = [| ~c : ~(codeList cs) |]
 
 -- The code generation monad: continuation passing over object level code.
 -- It is used to insert object level let bindings from meta level code,

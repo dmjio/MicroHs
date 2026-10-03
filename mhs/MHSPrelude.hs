@@ -14,7 +14,6 @@ module MHSPrelude(
   module Data.Eq,
   module Data.Float,
   module Data.Fractional,
-  module Data.RealFrac,
   module Data.Function,
   module Data.Functor,
   module Data.Int.Int,
@@ -61,7 +60,6 @@ import Data.Enum(Enum(..))
 import Data.Eq(Eq(..))
 import Data.Float(Float)
 import Data.Fractional(Fractional(..), (^^), realToFrac)
-import Data.RealFrac(RealFrac(..))
 import Data.Function(id, const, (.), flip, ($), seq, ($!), until, asTypeOf)
 import Data.Functor(Functor(..), (<$>))
 import Data.Int.Int(Int)
