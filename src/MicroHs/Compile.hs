@@ -616,7 +616,8 @@ getPaths = do
   let srcs = ["."]
   case mdir of
     -- If MHSDIR is set, use that and no package directories
-    Just dir -> return (dir, srcs ++ [dir </> "lib"], Nothing)
+    -- (Always use the Integer written in Haskell, see below.)
+    Just dir -> return (dir, srcs ++ [dir </> "lib" </> "no-gmp", dir </> "lib"], Nothing)
     Nothing -> do
       -- There are two scenarios: either we are running inplace or installed
       binDir <- takeDirectory <$> catch getExecutablePath (\ (_ :: SomeException) -> getProgName) -- ~/.mcabal/bin

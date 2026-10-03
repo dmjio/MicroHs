@@ -12,7 +12,7 @@ y = 0
 -----
 "../tmp/E.hs": line 5, col 1:
   found:    ;
-  expected: - LQIdent ( UQIdent [ QualString literal _primitive @ (# \ case let if QualDo do mdo
+  expected: - LQIdent ( UQIdent [ QualString literal ~ _primitive @ (# \ case let if QualDo do mdo
 
 =====
 module E() where
@@ -232,7 +232,7 @@ import Staged
 f :: Int -> Code Int
 f x = [| x |]
 -----
-"../tmp/E.hs": line 4, col 10: stage mismatch: x is meta level, but is used at object level
+"../tmp/E.hs": line 5, col 10: stage mismatch: x is meta level, but is used at object level
 
 =====
 module E() where
@@ -240,7 +240,7 @@ import Staged
 g :: Code Int -> Code (Code Int)
 g c = [| [| 1 |] |]
 -----
-"../tmp/E.hs": line 4, col 1: stage mismatch: the type Code Int is meta level, but is used at object level
+"../tmp/E.hs": line 5, col 1: stage mismatch: the type Code Int is meta level, but is used at object level
 
 =====
 END
