@@ -40,6 +40,7 @@ module MicroHs.Expr(
   lhsToType,
   subst, allBinders,
   allVarsExpr, allVarsBind, allVarsEqns, allVarsPat,
+  allEmbedFiles,
   setSLocExpr,
   errorMessage,
   Assoc(..), Fixity,
@@ -351,6 +352,7 @@ data Lit
   | LForImp IdentModule ImpEnt String CType
   | LCType CType            -- used for foreign export
   | LTick String
+  | LEmbedFile FilePath     -- $(embedFile "path"), replaced by the contents of the file by the type checker
   deriving (Eq, Show)
 
 instance NFData Lit where
@@ -368,6 +370,7 @@ instance NFData Lit where
   rnf (LForImp a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
   rnf (LCType e) = rnf e
   rnf (LTick a) = rnf a
+  rnf (LEmbedFile a) = rnf a
 
 -- A type of a C FFI function
 newtype CType = CType EType
@@ -721,6 +724,67 @@ eqExpr _ _ = False -- XXX good enough for instances
 ---------------------------------
 
 type DList a = [a] -> [a]
+
+-- All the $(embedFile "path") in a module, with their locations.
+allEmbedFiles :: [EDef] -> [(SLoc, FilePath)]
+allEmbedFiles ds = composeMap embDef ds []
+  where
+    embDef :: EDef -> DList (SLoc, FilePath)
+    embDef d =
+      case d of
+        Fcn _ eqns -> composeMap embEqn eqns
+        PatBind p e -> embExpr p . embExpr e
+        ForExp _ _ e _ -> embExpr e
+        Class _ _ _ bs -> composeMap embDef bs
+        Instance _ bs es -> composeMap embDef bs . composeMap embDef es
+        Pattern _ p me -> embExpr p . maybe id (composeMap embEqn) me
+        _ -> id
+    embEqn (Eqn ps alts) = composeMap embExpr ps . embAlts alts
+    embAlts (EAlts alts bs) = composeMap embAlt alts . composeMap embDef bs
+    embAlt (ss, e) = composeMap embStmt ss . embExpr e
+    embStmt s =
+      case s of
+        SBind p e -> embExpr p . embExpr e
+        SThen e -> embExpr e
+        SLet bs -> composeMap embDef bs
+        SRec ss -> composeMap embStmt ss
+    embListish l =
+      case l of
+        LList es -> composeMap embExpr es
+        LCompr e ss -> embExpr e . composeMap embStmt ss
+        LFrom e -> embExpr e
+        LFromTo e1 e2 -> embExpr e1 . embExpr e2
+        LFromThen e1 e2 -> embExpr e1 . embExpr e2
+        LFromThenTo e1 e2 e3 -> embExpr e1 . embExpr e2 . embExpr e3
+    embField f =
+      case f of
+        EField _ e -> embExpr e
+        _ -> id
+    embExpr :: Expr -> DList (SLoc, FilePath)
+    embExpr ae =
+      case ae of
+        ELit loc (LEmbedFile p) -> ((loc, p) :)
+        EApp f a -> embExpr f . embExpr a
+        EOper e ies -> embExpr e . composeMap (embExpr . snd) ies
+        ELam _ eqns -> composeMap embEqn eqns
+        ECase e arms -> embExpr e . composeMap (\ (p, alts) -> embExpr p . embAlts alts) arms
+        ELet bs e -> composeMap embDef bs . embExpr e
+        ETuple es -> composeMap embExpr es
+        EParen e -> embExpr e
+        EListish l -> embListish l
+        EDo _ ss -> composeMap embStmt ss
+        ESectL e _ -> embExpr e
+        ESectR _ e -> embExpr e
+        EIf e1 e2 e3 -> embExpr e1 . embExpr e2 . embExpr e3
+        EMultiIf alts -> embAlts alts
+        ESign e _ -> embExpr e
+        ENegApp e -> embExpr e
+        EUpdate e fs -> embExpr e . composeMap embField fs
+        EAt _ p -> embExpr p
+        EViewPat e p -> embExpr e . embExpr p
+        ELazy _ p -> embExpr p
+        EOr ps -> composeMap embExpr ps
+        _ -> id
 
 composeMap :: forall a b . (a -> DList b) -> [a] -> DList b
 composeMap _ [] = id
@@ -1116,6 +1180,7 @@ instance Pretty Lit where
       where isPtr = case ie of ImpStatic _ IPtr _ -> True; _ -> False
     LCType (CType t) -> showEType t
     LTick s    -> '!' : s
+    LEmbedFile s -> "$(embedFile " ++ show s ++ ")"
 
 instance Pretty EStmt where
   pPrintPrec l _ as =

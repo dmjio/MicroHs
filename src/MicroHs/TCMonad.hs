@@ -4,6 +4,7 @@ module MicroHs.TCMonad(
   get, put, gets, modify,
   ) where
 import qualified Prelude(); import MHSPrelude
+import Data.ByteString(ByteString)
 import Data.Functor.Identity
 import Control.Applicative
 import Control.Monad.Fail
@@ -163,9 +164,14 @@ data TCState = TC {
                   ArgDicts              -- dictionary arguments
                  ),
   constraints :: Constraints,           -- constraints that have to be solved
-  defaults    :: Defaults               -- current defaults
+  defaults    :: Defaults,              -- current defaults
+  embedFiles  :: [EmbedFile]            -- the files embedded with $(embedFile "path")
   }
   deriving (Show)
+
+-- A file embedded with $(embedFile "path"): the path as written, the path of the file
+-- that was read (the first is relative to the current directory, or the source file), and the contents.
+type EmbedFile = (FilePath, FilePath, ByteString)
 
 -- Hack to avoid cricular module reference.
 -- See comment for SetTCState in Expr

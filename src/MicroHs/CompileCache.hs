@@ -18,27 +18,29 @@ import System.IO
 import System.IO.Serialize
 import System.IO.MD5(MD5CheckSum)
 
-type CModule = (TModule [LDef], [IdentModule], MD5CheckSum)
+type CModule = (TModule [LDef], [IdentModule], MD5CheckSum, [FilePath])
 
 data CacheEntry =
    CompMdl                              -- module compiled in in this session
     (TModule [LDef])                    -- the cached module
     [IdentModule]                       -- imported module names
-    MD5CheckSum                         -- checksum of the source file
+    MD5CheckSum                         -- checksum of the source file and the embedded files
+    [FilePath]                          -- files embedded with $(embedFile "path")
   | PkgMdl                              -- module from a package
     (TModule [LDef])                    -- the cached module
 --  deriving (Show)
 
 instance NFData CacheEntry where
-  rnf (CompMdl a b c) = rnf a `seq` rnf b `seq` rnf c
+  rnf (CompMdl a b c d) = rnf a `seq` rnf b `seq` rnf c `seq` rnf d
   rnf (PkgMdl a) = rnf a
 
 tModuleOf :: CacheEntry -> TModule [LDef]
-tModuleOf (CompMdl t _ _) = t
+tModuleOf (CompMdl t _ _ _) = t
 tModuleOf (PkgMdl t) = t
 
-chksumOf :: CacheEntry -> MD5CheckSum
-chksumOf (CompMdl _ _ k) = k
+-- The checksum, and the embedded files that it covers.
+chksumOf :: CacheEntry -> (MD5CheckSum, [FilePath])
+chksumOf (CompMdl _ _ k fs) = (k, fs)
 chksumOf _ = undefined
 
 data Cache = Cache {
@@ -87,8 +89,8 @@ addWorking mn c =
         c{ working = mn : ws }
 
 workToDone :: CModule -> Cache -> Cache
-workToDone (t, i, k) c@(Cache{ working = _mn:ws, boots = bs, cache = m }) =
-  c{ working = ws, boots = filter (/= mn) bs, cache = M.insert mn (CompMdl t i k) m }
+workToDone (t, i, k, fs) c@(Cache{ working = _mn:ws, boots = bs, cache = m }) =
+  c{ working = ws, boots = filter (/= mn) bs, cache = M.insert mn (CompMdl t i k fs) m }
   -- The identifier in _mn is from the place of use (=import), but we want the cache
   -- to contain the identifier from the place of definition.
   where mn = tModuleName t
@@ -106,14 +108,14 @@ cachedNonPkgModuleNames c = [ i | (i, CompMdl{}) <- M.toList (cache c) ]
 lookupCache :: IdentModule -> Cache -> Maybe (TModule [LDef])
 lookupCache mn c = tModuleOf <$> M.lookup mn (cache c)
 
-lookupCacheChksum :: IdentModule -> Cache -> Maybe MD5CheckSum
+lookupCacheChksum :: IdentModule -> Cache -> Maybe (MD5CheckSum, [FilePath])
 lookupCacheChksum mn c = chksumOf <$> M.lookup mn (cache c)
 
 getImportDeps :: Cache -> [(IdentModule, [IdentModule])]
-getImportDeps cash = [ (tModuleName tm, imps) | CompMdl tm imps _ <- M.elems (cache cash) ]
+getImportDeps cash = [ (tModuleName tm, imps) | CompMdl tm imps _ _ <- M.elems (cache cash) ]
 
 getCompMdls :: Cache -> [TModule [LDef]]
-getCompMdls cash = [ tm | CompMdl tm _ _ <- M.elems (cache cash) ]
+getCompMdls cash = [ tm | CompMdl tm _ _ _ <- M.elems (cache cash) ]
 
 getPathPkgs :: Cache -> [(FilePath, Package)]
 getPathPkgs ch = [ (fp, p) | (Just fp, p) <- pkgs ch ]

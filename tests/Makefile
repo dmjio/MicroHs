@@ -56,6 +56,7 @@ test:
 	$(TMHS) IOArray    && $(EVAL) > IOArray.out    && diff IOArray.ref IOArray.out
 	$(TMHS) ST         && $(EVAL) > ST.out         && diff ST.ref ST.out
 	$(TMHS) HigherKind && $(EVAL) > HigherKind.out && diff HigherKind.ref HigherKind.out
+	$(TMHS) EmbedFile  && $(EVAL) > EmbedFile.out  && diff EmbedFile.ref EmbedFile.out
 	$(TMHS) PolyKind   && $(EVAL) > PolyKind.out   && diff PolyKind.ref PolyKind.out
 	$(TMHS) Record     && $(EVAL) > Record.out     && diff Record.ref Record.out
 	$(TMHS) Deriving   && $(EVAL) > Deriving.out   && diff Deriving.ref Deriving.out

@@ -87,6 +87,24 @@ This will not even try to open `Prelude.hs`.  It also avoids the automagic
 (qualified) import of `Mhs.Builtin` that normally happens.
 
 
+## Embedding files
+The expression `$(embedFile "path")` is replaced, at compile time, by the contents
+of the file `path` as a string literal (this is the only form of splice; there is no Template Haskell).
+The path is relative to the current directory, or else to the directory of the source file.
+Like any string literal it is overloaded: at type `ByteString` it is the raw bytes of the file,
+at type `String` (or any other `IsString` type, e.g. `Text`) the UTF-8 decoded contents.
+```Haskell
+import qualified Data.ByteString as BS
+
+logo :: BS.ByteString
+logo = $(embedFile "logo.png")
+
+license :: String
+license = $(embedFile "LICENSE")
+```
+A missing file is a compile time error, and a module is recompiled (also from the compilation cache)
+when an embedded file changes.
+
 ## Interactive mode
 If no module name is given the compiler enters interactive mode.
 You can enter expressions to be evaluated, or top level definitions (including `import`).

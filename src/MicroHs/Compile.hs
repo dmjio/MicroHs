@@ -22,6 +22,7 @@ import qualified Prelude(); import MHSPrelude
 import Control.Exception
 import qualified Data.ByteString as BS
 import Data.Char
+import Data.Function(on)
 import Data.List
 import Data.Maybe
 import Data.Version
@@ -48,7 +49,7 @@ import MicroHs.Package
 import MicroHs.Parse
 import MicroHs.StateIO
 import MicroHs.SymTab
-import MicroHs.TCMonad(TCState)
+import MicroHs.TCMonad(TCState, embedFiles)
 import MicroHs.TypeCheck
 import MicroHs.Version
 import Text.PrettyPrint.HughesPJLiteClass(prettyShow)
@@ -131,7 +132,7 @@ compile flags nm ach = do
 -- Compile a module for the interactive system
 compileInteractive :: Flags -> EModule -> CM (TModule [LDef], Symbols, TCState)
 compileInteractive flags mdl = do
-  ((dmdl, syms, _, _, _), tcstate) <- compileModuleP flags ImpNormal mdl
+  ((dmdl, syms, _, _, _), tcstate) <- compileModuleP flags ImpNormal "." mdl
   loadBoots flags
   loadDependencies flags
   return (dmdl, syms, tcstate)
@@ -217,7 +218,11 @@ compileModule flags impt mn pathfn file = do
     liftIO $ putStrLn $ "parsed:\n" ++ prettyShow pmdl
   when (isNothing (getFileName mn) && mn /= mnn) $
     mhsError $ "module name does not agree with file name: " ++ showIdent mn ++ " " ++ showIdent mnn
-  ((dmdl, syms, imported, tTCDesug, tImp), _) <- compileModuleP flags impt (addPreludeImport pmdl)
+  ((dmdl, syms, imported, tTCDesug, tImp), tcstate) <- compileModuleP flags impt (takeDirectory pathfn) (addPreludeImport pmdl)
+  -- The checksum covers the embedded files too, so the module is recompiled when they change.
+  let embPaths = [ q | (_, q, _) <- embedFiles tcstate ]
+  esums <- liftIO $ mapM md5BinaryFile embPaths
+  let chksum' = md5Combine (chksum : map (fromMaybe undefined) esums)
 
   t4 <- liftIO getTimeMilli
   cmdl <- liftIO $ evaluate $ compileToCombinators dmdl
@@ -236,12 +241,12 @@ compileModule flags impt mn pathfn file = do
     liftIO $ putStrLn $ "loaded " ++ showIdent mn ++ " (" ++ pathfn ++ ")"
 
   case impt of
-    ImpNormal -> modify $ workToDone (cmdl, map snd imported, chksum)
+    ImpNormal -> modify $ workToDone (cmdl, map snd imported, chksum', embPaths)
     ImpBoot   -> return ()
   return (cmdl, syms, tThis + tImp)
 
-compileModuleP :: Flags -> ImpType -> EModule -> CM ((TModule [LDef], Symbols, [(ImpType, IdentModule)], Time, Time), TCState)
-compileModuleP flags impt mdl@(EModule _ _ defs) = do
+compileModuleP :: Flags -> ImpType -> FilePath -> EModule -> CM ((TModule [LDef], Symbols, [(ImpType, IdentModule)], Time, Time), TCState)
+compileModuleP flags impt srcDir mdl@(EModule _ _ defs) = do
   -- liftIO $ putStrLn $ showEModule mdl
   -- liftIO $ putStrLn $ showEDefs defs
   let
@@ -250,9 +255,10 @@ compileModuleP flags impt mdl@(EModule _ _ defs) = do
   (impMdls, _, tImps) <- unzip3 <$> mapM (uncurry $ compileModuleCached flags) imported
 
   t3 <- liftIO getTimeMilli
+  embs <- liftIO $ readEmbedFiles srcDir (allEmbedFiles defs)
   glob <- gets getCacheTables
   let
-    (tmdl, glob', syms, tcstate) = typeCheck flags glob impt (zip specs impMdls) mdl
+    (tmdl, glob', syms, tcstate) = typeCheck flags glob embs impt (zip specs impMdls) mdl
   modify $ setCacheTables glob'
   dumpIf flags Dtypecheck $
     liftIO $ putStrLn $ "type checked:\n" ++ showTModule showEDefs tmdl ++ "-----\n"
@@ -264,6 +270,33 @@ compileModuleP flags impt mdl@(EModule _ _ defs) = do
       tImp = sum tImps
 
   return ((dmdl, syms, imported, tThis, tImp), tcstate)
+
+-- Read the files for $(embedFile "path").
+-- The path is relative to the current directory, or else to the directory of the source file.
+readEmbedFiles :: FilePath -> [(SLoc, FilePath)] -> IO [(FilePath, FilePath, BS.ByteString)]
+readEmbedFiles srcDir embs = mapM rd (nubBy ((==) `on` snd) embs)
+  where
+    rd (loc, p) = do
+      here <- doesFileExist p
+      there <- doesFileExist (srcDir </> p)
+      q <- if here then return p
+           else if there then return (srcDir </> p)
+           else errorMessage loc $ "embedFile: file not found: " ++ show p
+      r <- try (BS.readFile q)
+      case r of
+        Right bs -> return (p, q, bs)
+        Left exn -> errorMessage loc $ "embedFile: cannot read " ++ show q ++ ": " ++ show (exn :: SomeException)
+
+-- Checksum of a file that may be binary (md5File decodes the file as text).
+md5BinaryFile :: FilePath -> IO (Maybe MD5CheckSum)
+md5BinaryFile fn = do
+  mh <- openBinaryFileM fn ReadMode
+  case mh of
+    Nothing -> return Nothing
+    Just h -> do
+      cs <- md5Handle h
+      hClose h
+      return (Just cs)
 
 compileToCombinators :: TModule [LDef] -> TModule [LDef]
 compileToCombinators dmdl =
@@ -313,7 +346,7 @@ validateCache flags acash = execStateIO (mapM_ (validate . fst) fdeps) acash
       cash <- get
       case lookupCacheChksum mn cash of
         Nothing -> return () -- no longer in the cache, so just ignore.
-        Just chksum -> do
+        Just (chksum, embs) -> do
           mhdl <- liftIO $ findModulePath flags ".hs" mn
           case mhdl of
             Nothing ->
@@ -322,7 +355,9 @@ validateCache flags acash = execStateIO (mapM_ (validate . fst) fdeps) acash
             Just (_, h) -> do
               cs <- liftIO $ md5Handle h
               liftIO $ hClose h
-              when (cs /= chksum) $
+              esums <- liftIO $ mapM md5BinaryFile embs       -- the embedded files are part of the checksum
+              let cs' = md5Combine (cs : map (fromMaybe undefined) esums)
+              when (any isNothing esums || cs' /= chksum) $
                 -- bad checksum, invalidate module
                 invalidate mn
 
