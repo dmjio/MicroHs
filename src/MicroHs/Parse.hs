@@ -899,11 +899,21 @@ pAExpr' =
   <|> (lpar *> (ESectR <$> pOperCommaNoMinus) <*> (pExprOp <* rpar))
   <|> (lpar *> (ESelect <$> some pSelect <* rpar))
   <|> (pKeyword "_primitive" *> (ELit noSLoc . LPrim <$> pString))
+  <|> (pSpec 'S' *> pEmbedFile <* rpar)
   <|> (pSpec '@' *> (ETypeArg <$> pAType))
   <|> (pSpec 'L' *> (uTuple <$> sepBy pExpr comma <* pSpec 'R'))
   <|> pUSummand pExpr
   -- This weirdly slows down parsing
   -- <?> "aexpr"
+
+-- The only splice: $(embedFile "path") embeds the contents of the file,
+-- read at compile time, as a string literal.
+pEmbedFile :: P Expr
+pEmbedFile = do
+  loc <- getSLoc
+  f <- pLIdent
+  guard (unIdent f == "embedFile")
+  ELit loc . LEmbedFile <$> pString
 
 pListish :: P Listish
 pListish = do

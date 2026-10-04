@@ -30,6 +30,7 @@ data Token
                                   --  NOT YET  @  for type app
                                   --  L  for (#
                                   --  R  for #)
+                                  --  S  for $( (splice)
                                   --  I  interpolation start
                                   --  E  interpolation end
                                   --  $  interpolation expr start
@@ -120,6 +121,9 @@ lex loc ('#':xcs) | (SLoc _ _ 1) <- loc, Just cs <- stripPrefix "line " xcs =
   skipLine loc xcs
 lex loc ('!':' ':cs) =  -- ! followed by a space is always an operator
   TIdent loc [] "!" : lex (addCol loc 2) cs
+-- $( with no space starts a splice, $(embedFile "path"), as in Template Haskell.
+lex loc ('$':'(':cs) =
+  TSpec loc 'S' : lex (addCol loc 2) cs
 lex loc (c:cs@(d:_)) | isSpecSing c && not (isOperChar d) = -- handle reserved
   TSpec loc c :
     let ts = lex (addCol loc 1) cs

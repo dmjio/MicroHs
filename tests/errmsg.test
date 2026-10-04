@@ -227,4 +227,11 @@ x = 0xffff_
 "../tmp/E.hs": line 3, col 11: _ cannot be used as a variable
 
 =====
+module E() where
+x :: String
+x = $(embedFile "no-such-file.txt")
+-----
+"../tmp/E.hs": line 4, col 7: embedFile: file not found: "no-such-file.txt"
+
+=====
 END

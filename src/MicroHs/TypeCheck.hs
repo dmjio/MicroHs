@@ -19,7 +19,10 @@ module MicroHs.TypeCheck(
 import qualified Prelude(); import MHSPrelude
 import Control.Applicative
 import Control.Monad
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BS
+import Data.Bits((.&.))
+import Data.Word(Word8)
 import Data.Char
 import Data.Function
 import Data.List
@@ -103,15 +106,15 @@ type FixDef = (Ident, Fixity)
 type Sigma = EType
 type Rho   = EType
 
-typeCheck :: Flags -> GlobTables -> ImpType -> [(ImportSpec, TModule a)] -> EModule -> (TModule [EDef], GlobTables, Symbols, TCState)
-typeCheck flags globs impt aimps (EModule mn exps defs) =
+typeCheck :: Flags -> GlobTables -> [EmbedFile] -> ImpType -> [(ImportSpec, TModule a)] -> EModule -> (TModule [EDef], GlobTables, Symbols, TCState)
+typeCheck flags globs embs impt aimps (EModule mn exps defs) =
 --  trace (unlines $ map (showTModuleExps . snd) aimps) $
   let
     imps = map filterImports aimps
     tc =
       case defs of
-        SetTCState tcs : _ -> xTCStateToTCState tcs  -- hack to set the saved TCState
-        _ -> mkTCState mn globs imps
+        SetTCState tcs : _ -> (xTCStateToTCState tcs){ embedFiles = embs }  -- hack to set the saved TCState
+        _ -> (mkTCState mn globs imps){ embedFiles = embs }
   in case tcRun (tcDefs flags impt defs) tc of
        (tds, tcs) ->
          let
@@ -331,7 +334,8 @@ mkTCState mdlName globs mdls =
           classTable = gClassTable globs,
           ctxTables = (gInstInfo globs, [], [], []),
           constraints = [],
-          defaults = dflts
+          defaults = dflts,
+          embedFiles = []
         }
 
 mergeDefaults :: Defaults -> Defaults -> Defaults
@@ -1963,6 +1967,19 @@ tcExprR mt ae =
                   -- We don't need to check that _at is String, it's part of the fromString type.
                   --tcTrace ("LStr " ++ show (loc, r))
                   instSigma loc (EApp f ae) rt mt
+            -- $(embedFile "path"): the contents of the file as a literal.
+            -- A ByteString gets the raw bytes, anything else the UTF-8 decoded string
+            -- (with the usual OverloadedStrings treatment).
+            LEmbedFile p -> do
+              embs <- gets embedFiles
+              let bs = case [ b | (p', _, b) <- embs, p' == p ] of
+                         b : _ -> b
+                         [] -> impossible   -- the files are read before type checking
+              mex <- getExpected mt
+              case mex of
+                Just (EVar bsi)
+                 | bsi == identByteString -> tcLit mt loc (LBStr bs)
+                _ -> tcExpr mt (ELit loc (LStr (utf8Decode (B.unpack bs))))
             -- Not LInteger, LRat, LStr
             _ -> tcLit mt loc lit
         _ -> impossible
@@ -2505,6 +2522,25 @@ tcLit mt loc l = do
 
 tcLit' :: Expected -> SLoc -> Lit -> EType -> T Expr
 tcLit' mt loc l t = instSigma loc (ELit loc l) t mt
+
+-- Decode UTF-8; invalid sequences become the replacement character.
+utf8Decode :: [Word8] -> String
+utf8Decode [] = []
+utf8Decode (b : bs)
+  | b < 0x80 = chr (fromIntegral b) : utf8Decode bs
+  | b < 0xc0 = bad
+  | b < 0xe0 = multi 1 (fromIntegral b .&. 0x1f)
+  | b < 0xf0 = multi 2 (fromIntegral b .&. 0x0f)
+  | b < 0xf8 = multi 3 (fromIntegral b .&. 0x07)
+  | otherwise = bad
+  where
+    bad = '\xfffd' : utf8Decode bs
+    multi :: Int -> Int -> String
+    multi n c =
+      case splitAt n bs of
+        (cs, rest) | length cs == n && all (\ x -> x .&. 0xc0 == 0x80) cs ->
+          chr (foldl (\ a x -> a * 64 + (fromIntegral x .&. 0x3f)) c cs) : utf8Decode rest
+        _ -> bad
 
 -- tcOper is in T because it has to look up identifiers, and get the fixity table.
 -- But there is no type checking happening here.

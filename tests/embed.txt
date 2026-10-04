@@ -1,0 +1,2 @@
+Hello, embedded world!
+Line two: café ✓

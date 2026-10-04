@@ -82,6 +82,7 @@
     - --ignore-glob=tests/Record.hs
     - --ignore-glob=tests/ForeignC.hs
     - --ignore-glob=tests/ForImpJS.hs
+    - --ignore-glob=tests/EmbedFile.hs
     - --ignore-glob=tests/Fix.hs
     - --ignore-glob=tests/Unboxed.hs
     - --ignore-glob=tests/TypeOp.hs
