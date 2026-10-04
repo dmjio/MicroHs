@@ -1,6 +1,6 @@
 -- Copyright 2023 Lennart Augustsson
 -- See LICENSE file for full license.
-module System.IO.MD5(MD5CheckSum, md5File, md5Handle) where
+module System.IO.MD5(MD5CheckSum, md5File, md5Handle, md5Combine) where
 import Control.DeepSeq
 import System.IO
 
@@ -15,3 +15,6 @@ md5File _ = return (Just $ MD5 [])          -- dummy MD5
 
 md5Handle :: Handle -> IO MD5CheckSum
 md5Handle _ = return $ MD5 []          -- dummy MD5
+
+md5Combine :: [MD5CheckSum] -> MD5CheckSum
+md5Combine ms = MD5 (concat [ ws | MD5 ws <- ms ])   -- dummy MD5
